@@ -53,7 +53,8 @@ static const char *DISPLAY_SPIFFS_PARTITION_LABEL = NULL;
 /* Thickness of each white Wi-Fi fan band. Larger makes each band bolder. */
 #define DISPLAY_WIFI_ICON_BAND_THICKNESS 2
 #define DISPLAY_WIFI_ICON_DOT_RADIUS 2
-#define DISPLAY_WIFI_ICON_SLASH_THICKNESS 4
+#define DISPLAY_WIFI_ICON_SLASH_THICKNESS 3
+#define DISPLAY_WIFI_ICON_SLASH_OFFSET_X -6
 
 typedef struct {
     char ascii;
@@ -433,11 +434,11 @@ static void display_draw_wifi_icon_base(const display_view_model_t *view_model)
 static void display_draw_wifi_icon_disconnected_slash(void)
 {
     int slash_start_x = DISPLAY_WIFI_ICON_X + DISPLAY_WIFI_ICON_ORIGIN_OFFSET_X + DISPLAY_WIFI_ICON_FIRST_OUTER_RADIUS +
-                        ((DISPLAY_WIFI_ICON_BAND_COUNT - 1) * DISPLAY_WIFI_ICON_RADIUS_STEP) - 1;
+                        ((DISPLAY_WIFI_ICON_BAND_COUNT - 1) * DISPLAY_WIFI_ICON_RADIUS_STEP) DISPLAY_WIFI_ICON_SLASH_OFFSET_X;
     int slash_start_y = DISPLAY_WIFI_ICON_Y + DISPLAY_WIFI_ICON_ORIGIN_OFFSET_Y -
                         (DISPLAY_WIFI_ICON_FIRST_OUTER_RADIUS +
                          ((DISPLAY_WIFI_ICON_BAND_COUNT - 1) * DISPLAY_WIFI_ICON_RADIUS_STEP)) + 1;
-    int slash_end_x = DISPLAY_WIFI_ICON_X + DISPLAY_WIFI_ICON_ORIGIN_OFFSET_X - 1;
+    int slash_end_x = DISPLAY_WIFI_ICON_X + DISPLAY_WIFI_ICON_ORIGIN_OFFSET_X DISPLAY_WIFI_ICON_SLASH_OFFSET_X;
     int slash_end_y = DISPLAY_WIFI_ICON_Y + DISPLAY_WIFI_ICON_ORIGIN_OFFSET_Y + 1;
 
     display_draw_thick_line(slash_start_x,
