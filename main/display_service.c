@@ -7,6 +7,7 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "display_config.h"
+#include "display_status_icon_renderer.h"
 #include "esp_heap_caps.h"
 #include "esp_check.h"
 #include "esp_lcd_io_spi.h"
@@ -34,29 +35,12 @@ static const char *DISPLAY_SPIFFS_PARTITION_LABEL = NULL;
 #define DISPLAY_DMA_WAIT_TIMEOUT_MS 1000
 #define DISPLAY_COLOR_WHITE 0xFFFF
 #define DISPLAY_COLOR_BLACK 0x0000
-#define DISPLAY_COLOR_RED 0xF800
-#define DISPLAY_STATUS_TEXT_BUFFER_SIZE 16
-#define DISPLAY_WIFI_ICON_SIZE 34
-/* Right padding of the Wi-Fi icon box. Smaller moves the icon closer to the right edge. */
-#define DISPLAY_WIFI_ICON_MARGIN_RIGHT 0
-#define DISPLAY_WIFI_ICON_X (DISPLAY_WIDTH - DISPLAY_WIFI_ICON_SIZE - DISPLAY_WIFI_ICON_MARGIN_RIGHT)
-/* Top padding of the Wi-Fi icon box inside the first line region. Smaller moves it upward. */
-#define DISPLAY_WIFI_ICON_Y 0
-/* Wi-Fi icon drawing origin X inside the icon box. Larger moves the fan right. */
-#define DISPLAY_WIFI_ICON_ORIGIN_OFFSET_X 18
-/* Wi-Fi icon drawing origin Y inside the icon box. Larger moves the fan downward. */
-#define DISPLAY_WIFI_ICON_ORIGIN_OFFSET_Y 17
-/* Total number of Wi-Fi signal bands used by the icon. */
-#define DISPLAY_WIFI_ICON_BAND_COUNT 3
-/* Outer radius of the innermost fan band. Larger makes the whole icon larger. */
-#define DISPLAY_WIFI_ICON_FIRST_OUTER_RADIUS 7
-/* Radius increment between adjacent bands. Larger increases spacing and overall spread. */
-#define DISPLAY_WIFI_ICON_RADIUS_STEP 4
-/* Thickness of each white Wi-Fi fan band. Larger makes each band bolder. */
-#define DISPLAY_WIFI_ICON_BAND_THICKNESS 2
-#define DISPLAY_WIFI_ICON_DOT_RADIUS 2
-#define DISPLAY_WIFI_ICON_SLASH_THICKNESS 3
-#define DISPLAY_WIFI_ICON_SLASH_OFFSET_X -6
+#define DISPLAY_STATUS_TEXT_BUFFER_SIZE 48
+#define DISPLAY_TOP_RIGHT_ICON_BOX_SIZE 34
+#define DISPLAY_TOP_RIGHT_ICON_MARGIN_RIGHT 0
+#define DISPLAY_TOP_RIGHT_ICON_MARGIN_TOP 0
+#define DISPLAY_TOP_RIGHT_ICON_X (DISPLAY_WIDTH - DISPLAY_TOP_RIGHT_ICON_BOX_SIZE - DISPLAY_TOP_RIGHT_ICON_MARGIN_RIGHT)
+#define DISPLAY_TOP_RIGHT_ICON_Y DISPLAY_TOP_RIGHT_ICON_MARGIN_TOP
 
 typedef struct {
     char ascii;
@@ -101,9 +85,7 @@ static uint16_t *s_line_buffer;
 static SemaphoreHandle_t s_flush_done_sem;
 static esp_lcd_panel_io_handle_t s_panel_io;
 static esp_lcd_panel_handle_t s_panel;
-static bool s_last_wifi_icon_visible;
-static bool s_last_wifi_connected;
-static uint8_t s_last_wifi_signal_level;
+static display_status_icon_t s_last_top_right_icon;
 static bool s_last_time_valid;
 static struct tm s_last_time;
 
@@ -188,19 +170,30 @@ static bool display_time_equals(const struct tm *left, const struct tm *right)
            (left->tm_sec == right->tm_sec);
 }
 
-/* Formats a textual representation of the Wi-Fi icon state for log fallback. */
-static void display_format_status_line(const display_view_model_t *view_model,
+/* Compares the cached top-right icon state used for partial redraw decisions. */
+static bool display_status_icon_equals(const display_status_icon_t *left,
+                                       const display_status_icon_t *right)
+{
+    return (left->visible == right->visible) &&
+           (left->kind == right->kind) &&
+           (left->variant == right->variant) &&
+           (left->level == right->level);
+}
+
+/* Formats a textual representation of the generic top-right icon state for log fallback. */
+static void display_format_status_line(const display_status_icon_t *icon,
                                        char *status_line,
                                        size_t status_line_size)
 {
-    if (!view_model->wifi_icon_visible) {
+    if ((icon == NULL) || !icon->visible || (icon->kind == DISPLAY_STATUS_ICON_KIND_NONE)) {
         display_copy_line(status_line, status_line_size, "ICON HIDDEN");
-    } else if (!view_model->wifi_connected) {
-        display_copy_line(status_line, status_line_size, "WIFI OFF");
-    } else if (view_model->wifi_signal_level == 0U) {
-        display_copy_line(status_line, status_line_size, "WIFI BASE");
     } else {
-        snprintf(status_line, status_line_size, "WIFI L%u", view_model->wifi_signal_level);
+        snprintf(status_line,
+                 status_line_size,
+                 "ICON kind=%u variant=%u level=%u",
+                 (unsigned int)icon->kind,
+                 (unsigned int)icon->variant,
+                 (unsigned int)icon->level);
     }
 }
 
@@ -308,163 +301,20 @@ static void display_draw_ascii_text(const char *text, int scale, int x_offset, i
     }
 }
 
-/* Returns the absolute value of a signed integer. */
-static int display_abs_int(int value)
+/* Clears the top status region and draws the current top-right icon through the dedicated renderer. */
+static esp_err_t display_render_status_icon_region(const display_status_icon_t *icon)
 {
-    return value < 0 ? -value : value;
-}
+    display_canvas_t canvas = {
+        .pixels = s_line_buffer,
+        .width = DISPLAY_WIDTH,
+        .height = DISPLAY_LINE_HEIGHT,
+    };
 
-/* Draws a filled circle into the temporary line buffer. */
-static void display_draw_filled_circle(int center_x, int center_y, int radius, uint16_t color)
-{
-    int row = 0;
-    int column = 0;
-    int radius_squared = radius * radius;
-
-    for (row = -radius; row <= radius; ++row) {
-        for (column = -radius; column <= radius; ++column) {
-            int distance_squared = (column * column) + (row * row);
-
-            if (distance_squared <= radius_squared) {
-                display_buffer_set_pixel(center_x + column, center_y + row, color);
-            }
-        }
-    }
-}
-
-/* Draws one 90-degree fan band centered on the upward vertical axis. */
-static void display_draw_wifi_sector_band(int x_offset, int y_offset, int inner_radius, int outer_radius, uint16_t color)
-{
-    int local_x = 0;
-    int local_y = 0;
-    int origin_x = x_offset + DISPLAY_WIFI_ICON_ORIGIN_OFFSET_X;
-    int origin_y = y_offset + DISPLAY_WIFI_ICON_ORIGIN_OFFSET_Y;
-    int inner_radius_squared = inner_radius * inner_radius;
-    int outer_radius_squared = outer_radius * outer_radius;
-
-    for (local_y = 0; local_y < DISPLAY_WIFI_ICON_SIZE; ++local_y) {
-        for (local_x = 0; local_x < DISPLAY_WIFI_ICON_SIZE; ++local_x) {
-            int dx = local_x - DISPLAY_WIFI_ICON_ORIGIN_OFFSET_X;
-            int dy = DISPLAY_WIFI_ICON_ORIGIN_OFFSET_Y - local_y;
-            int distance_squared = 0;
-
-            if (dy < 0) {
-                continue;
-            }
-            if (display_abs_int(dx) > dy) {
-                continue;
-            }
-
-            distance_squared = (dx * dx) + (dy * dy);
-            if ((distance_squared >= inner_radius_squared) &&
-                (distance_squared <= outer_radius_squared)) {
-                if ((dx == 0) && (dy == outer_radius)) {
-                    continue;
-                }
-                display_buffer_set_pixel(origin_x + dx, origin_y - dy, color);
-            }
-        }
-    }
-}
-
-/* Draws a thick diagonal slash used by the disconnected icon state. */
-static void display_draw_thick_line(int x0, int y0, int x1, int y1, int thickness, uint16_t color)
-{
-    int delta_x = display_abs_int(x1 - x0);
-    int delta_y = display_abs_int(y1 - y0);
-    int step_x = x0 < x1 ? 1 : -1;
-    int step_y = y0 < y1 ? 1 : -1;
-    int error = delta_x - delta_y;
-    int half_thickness = thickness / 2;
-
-    while (true) {
-        display_buffer_fill_rect(x0 - half_thickness,
-                                 y0 - half_thickness,
-                                 thickness,
-                                 thickness,
-                                 color);
-
-        if ((x0 == x1) && (y0 == y1)) {
-            break;
-        }
-
-        if ((error * 2) > -delta_y) {
-            error -= delta_y;
-            x0 += step_x;
-        }
-        if ((error * 2) < delta_x) {
-            error += delta_x;
-            y0 += step_y;
-        }
-    }
-}
-
-/* Resolves how many white Wi-Fi bands should be shown for the current signal state. */
-static uint8_t display_get_wifi_band_count(const display_view_model_t *view_model)
-{
-    if (!view_model->wifi_connected) {
-        return DISPLAY_WIFI_ICON_BAND_COUNT;
-    }
-    if ((view_model->wifi_signal_level < 1U) || (view_model->wifi_signal_level > DISPLAY_WIFI_ICON_BAND_COUNT)) {
-        return DISPLAY_WIFI_ICON_BAND_COUNT;
-    }
-
-    return view_model->wifi_signal_level;
-}
-
-/* Draws the base Wi-Fi fan icon at the fixed top-right location. */
-static void display_draw_wifi_icon_base(const display_view_model_t *view_model)
-{
-    uint8_t band_count = display_get_wifi_band_count(view_model);
-    int band_index = 0;
-    int outer_radius = 0;
-    int inner_radius = 0;
-    int dot_center_x = DISPLAY_WIFI_ICON_X + DISPLAY_WIFI_ICON_ORIGIN_OFFSET_X;
-    int dot_center_y = DISPLAY_WIFI_ICON_Y + DISPLAY_WIFI_ICON_ORIGIN_OFFSET_Y;
-
-    display_draw_filled_circle(dot_center_x, dot_center_y, DISPLAY_WIFI_ICON_DOT_RADIUS, DISPLAY_COLOR_WHITE);
-
-    for (band_index = 0; band_index < band_count; ++band_index) {
-        outer_radius = DISPLAY_WIFI_ICON_FIRST_OUTER_RADIUS + (band_index * DISPLAY_WIFI_ICON_RADIUS_STEP);
-        inner_radius = outer_radius - DISPLAY_WIFI_ICON_BAND_THICKNESS;
-        display_draw_wifi_sector_band(DISPLAY_WIFI_ICON_X,
-                                      DISPLAY_WIFI_ICON_Y,
-                                      inner_radius,
-                                      outer_radius,
-                                      DISPLAY_COLOR_WHITE);
-    }
-}
-
-/* Overlays the red slash used by the disconnected Wi-Fi icon state. */
-static void display_draw_wifi_icon_disconnected_slash(void)
-{
-    int slash_start_x = DISPLAY_WIFI_ICON_X + DISPLAY_WIFI_ICON_ORIGIN_OFFSET_X + DISPLAY_WIFI_ICON_FIRST_OUTER_RADIUS +
-                        ((DISPLAY_WIFI_ICON_BAND_COUNT - 1) * DISPLAY_WIFI_ICON_RADIUS_STEP) DISPLAY_WIFI_ICON_SLASH_OFFSET_X;
-    int slash_start_y = DISPLAY_WIFI_ICON_Y + DISPLAY_WIFI_ICON_ORIGIN_OFFSET_Y -
-                        (DISPLAY_WIFI_ICON_FIRST_OUTER_RADIUS +
-                         ((DISPLAY_WIFI_ICON_BAND_COUNT - 1) * DISPLAY_WIFI_ICON_RADIUS_STEP)) + 1;
-    int slash_end_x = DISPLAY_WIFI_ICON_X + DISPLAY_WIFI_ICON_ORIGIN_OFFSET_X DISPLAY_WIFI_ICON_SLASH_OFFSET_X;
-    int slash_end_y = DISPLAY_WIFI_ICON_Y + DISPLAY_WIFI_ICON_ORIGIN_OFFSET_Y + 1;
-
-    display_draw_thick_line(slash_start_x,
-                            slash_start_y,
-                            slash_end_x,
-                            slash_end_y,
-                            DISPLAY_WIFI_ICON_SLASH_THICKNESS,
-                            DISPLAY_COLOR_RED);
-}
-
-/* Clears the top status region and draws the Wi-Fi icon at the fixed top-right location. */
-static esp_err_t display_render_status_icon_region(const display_view_model_t *view_model)
-{
     display_buffer_fill(DISPLAY_COLOR_BLACK);
-
-    if (view_model->wifi_icon_visible) {
-        display_draw_wifi_icon_base(view_model);
-        if (!view_model->wifi_connected) {
-            display_draw_wifi_icon_disconnected_slash();
-        }
-    }
+    display_status_icon_renderer_draw(icon,
+                                      &canvas,
+                                      DISPLAY_TOP_RIGHT_ICON_X,
+                                      DISPLAY_TOP_RIGHT_ICON_Y);
 
     return display_push_line_buffer(0);
 }
@@ -628,9 +478,7 @@ esp_err_t display_service_init(void)
     s_use_log_backend = false;
     s_backend_warning_logged = false;
     s_has_cached_view = false;
-    s_last_wifi_icon_visible = false;
-    s_last_wifi_connected = false;
-    s_last_wifi_signal_level = 0;
+    memset(&s_last_top_right_icon, 0, sizeof(s_last_top_right_icon));
     s_last_time_valid = false;
     memset(&s_last_time, 0, sizeof(s_last_time));
 
@@ -663,7 +511,7 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
         return ESP_ERR_INVALID_ARG;
     }
 
-    display_format_status_line(view_model, status_line, sizeof(status_line));
+    display_format_status_line(&view_model->top_right_icon, status_line, sizeof(status_line));
     display_format_time_lines(view_model,
                               date_line,
                               sizeof(date_line),
@@ -676,9 +524,7 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
                       display_time_equals(&view_model->current_time, &s_last_time));
 
     if (s_has_cached_view &&
-        (view_model->wifi_icon_visible == s_last_wifi_icon_visible) &&
-        (view_model->wifi_connected == s_last_wifi_connected) &&
-        (view_model->wifi_signal_level == s_last_wifi_signal_level) &&
+        display_status_icon_equals(&view_model->top_right_icon, &s_last_top_right_icon) &&
         (view_model->time_valid == s_last_time_valid) &&
         time_unchanged) {
         return ESP_OK;
@@ -693,7 +539,7 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
         ESP_LOGI(TAG, "Screen line2: %s", date_line);
         ESP_LOGI(TAG, "Screen line3: %s", time_line);
     } else {
-        ret = display_render_status_icon_region(view_model);
+        ret = display_render_status_icon_region(&view_model->top_right_icon);
         if (ret == ESP_OK) {
             ret = display_render_line_region(1, date_line, DISPLAY_DATE_SCALE);
         }
@@ -707,9 +553,7 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
     }
 
     s_has_cached_view = true;
-    s_last_wifi_icon_visible = view_model->wifi_icon_visible;
-    s_last_wifi_connected = view_model->wifi_connected;
-    s_last_wifi_signal_level = view_model->wifi_signal_level;
+    s_last_top_right_icon = view_model->top_right_icon;
     s_last_time_valid = view_model->time_valid;
     if (view_model->time_valid) {
         s_last_time = view_model->current_time;

@@ -34,6 +34,7 @@
 #include "esp_blufi.h"
 #include "display_service.h"
 #include "rtc_service.h"
+#include "status_presenter.h"
 #include "time_service.h"
 
 #ifndef CONFIG_SOC_BLUFI_SUPPORTED
@@ -146,41 +147,31 @@ static void example_sync_rtc_from_system_time(void)
     BLUFI_INFO("RTC updated from synchronized system time\n");
 }
 
-/* Maps the current STA RSSI value to the 1..3 Wi-Fi strength levels used by the TFT icon. */
-static uint8_t example_map_rssi_to_wifi_level(int rssi)
-{
-    if (rssi <= -85) {
-        return 1;
-    }
-    if (rssi <= -70) {
-        return 2;
-    }
-
-    return 3;
-}
-
-/* Reads the connected AP RSSI. A return value of 0 means "connected, but no valid RSSI level available". */
-static uint8_t example_get_wifi_signal_level(void)
+/* Reads the connected AP RSSI and reports whether the value is available. */
+static bool example_get_wifi_rssi(int *rssi_out)
 {
     wifi_ap_record_t ap_record = {0};
     esp_err_t ret = ESP_OK;
 
-    if (!gl_sta_got_ip) {
-        return 0;
+    if ((rssi_out == NULL) || !gl_sta_got_ip) {
+        return false;
     }
 
     ret = esp_wifi_sta_get_ap_info(&ap_record);
     if (ret != ESP_OK) {
         BLUFI_ERROR("Failed to read Wi-Fi RSSI: %s\n", esp_err_to_name(ret));
-        return 0;
+        return false;
     }
 
-    return example_map_rssi_to_wifi_level(ap_record.rssi);
+    *rssi_out = ap_record.rssi;
+
+    return true;
 }
 
-/* Builds the display view model once per second and hands it to the renderer. */
+/* Collects raw runtime state once per second and delegates display mapping to the presenter layer. */
 static void example_ui_task(void *arg)
 {
+    status_presenter_input_t presenter_input = {0};
     display_view_model_t view_model = {0};
     esp_err_t ret = ESP_OK;
 
@@ -191,19 +182,30 @@ static void example_ui_task(void *arg)
             example_sync_rtc_from_system_time();
         }
 
+        memset(&presenter_input, 0, sizeof(presenter_input));
         memset(&view_model, 0, sizeof(view_model));
-        view_model.wifi_icon_visible = true;
-        view_model.wifi_connected = gl_sta_got_ip;
-        view_model.wifi_signal_level = view_model.wifi_connected ? example_get_wifi_signal_level() : 0;
-        view_model.time_valid = time_service_has_valid_time();
 
-        if (view_model.time_valid) {
-            ret = time_service_get_local_time(&view_model.current_time);
+        presenter_input.wifi_connected = gl_sta_got_ip;
+        presenter_input.time_valid = time_service_has_valid_time();
+
+        if (presenter_input.wifi_connected) {
+            presenter_input.wifi_rssi_valid = example_get_wifi_rssi(&presenter_input.wifi_rssi);
+        }
+
+        if (presenter_input.time_valid) {
+            ret = time_service_get_local_time(&presenter_input.current_time);
             if (ret != ESP_OK) {
                 BLUFI_ERROR("Failed to get local time for display: %s\n", esp_err_to_name(ret));
-                view_model.time_valid = false;
-                memset(&view_model.current_time, 0, sizeof(view_model.current_time));
+                presenter_input.time_valid = false;
+                memset(&presenter_input.current_time, 0, sizeof(presenter_input.current_time));
             }
+        }
+
+        ret = status_presenter_build_display_model(&presenter_input, &view_model);
+        if (ret != ESP_OK) {
+            BLUFI_ERROR("Status presenter failed: %s\n", esp_err_to_name(ret));
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
 
         ret = display_service_render(&view_model);

@@ -7,10 +7,25 @@
 
 #include "esp_err.h"
 
+typedef enum {
+    DISPLAY_STATUS_ICON_KIND_NONE = 0,
+    DISPLAY_STATUS_ICON_KIND_WIFI = 1,
+} display_status_icon_kind_t;
+
+typedef enum {
+    DISPLAY_STATUS_ICON_VARIANT_NORMAL = 0,
+    DISPLAY_STATUS_ICON_VARIANT_ALERT = 1,
+} display_status_icon_variant_t;
+
 typedef struct {
-    bool wifi_icon_visible;
-    bool wifi_connected;
-    uint8_t wifi_signal_level;
+    bool visible;
+    display_status_icon_kind_t kind;
+    display_status_icon_variant_t variant;
+    uint8_t level;
+} display_status_icon_t;
+
+typedef struct {
+    display_status_icon_t top_right_icon;
     bool time_valid;
     struct tm current_time;
 } display_view_model_t;

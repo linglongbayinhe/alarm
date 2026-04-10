@@ -133,9 +133,14 @@ void app_main(void)
     
     // 然后显示正常的时间信息
     display_view_model_t view_model = {
-        .wifi_connected = false,
+        .top_right_icon = {
+            .visible = false,
+            .kind = DISPLAY_STATUS_ICON_KIND_NONE,
+            .variant = DISPLAY_STATUS_ICON_VARIANT_NORMAL,
+            .level = 0,
+        },
         .time_valid = false,
-        .current_time = {}
+        .current_time = {0}
     };
     display_service_render(&view_model);
 }
