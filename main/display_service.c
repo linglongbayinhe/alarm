@@ -37,13 +37,15 @@ static const char *DISPLAY_SPIFFS_PARTITION_LABEL = NULL;
 #define DISPLAY_COLOR_RED 0xF800
 #define DISPLAY_STATUS_TEXT_BUFFER_SIZE 16
 #define DISPLAY_WIFI_ICON_SIZE 34
-#define DISPLAY_WIFI_ICON_MARGIN_RIGHT 10
+/* Right padding of the Wi-Fi icon box. Smaller moves the icon closer to the right edge. */
+#define DISPLAY_WIFI_ICON_MARGIN_RIGHT 0
 #define DISPLAY_WIFI_ICON_X (DISPLAY_WIDTH - DISPLAY_WIFI_ICON_SIZE - DISPLAY_WIFI_ICON_MARGIN_RIGHT)
-#define DISPLAY_WIFI_ICON_Y ((DISPLAY_LINE_HEIGHT - DISPLAY_WIFI_ICON_SIZE) / 2)
+/* Top padding of the Wi-Fi icon box inside the first line region. Smaller moves it upward. */
+#define DISPLAY_WIFI_ICON_Y 0
 /* Wi-Fi icon drawing origin X inside the icon box. Larger moves the fan right. */
-#define DISPLAY_WIFI_ICON_ORIGIN_OFFSET_X 16
+#define DISPLAY_WIFI_ICON_ORIGIN_OFFSET_X 18
 /* Wi-Fi icon drawing origin Y inside the icon box. Larger moves the fan downward. */
-#define DISPLAY_WIFI_ICON_ORIGIN_OFFSET_Y 28
+#define DISPLAY_WIFI_ICON_ORIGIN_OFFSET_Y 17
 /* Total number of Wi-Fi signal bands used by the icon. */
 #define DISPLAY_WIFI_ICON_BAND_COUNT 3
 /* Outer radius of the innermost fan band. Larger makes the whole icon larger. */
@@ -89,7 +91,7 @@ static const display_glyph_t DISPLAY_GLYPHS[] = {
     {'w', 5, {0x00, 0x00, 0x11, 0x15, 0x15, 0x15, 0x0A}},
 };
 
-static const int DISPLAY_LINE_START_Y[DISPLAY_LINE_COUNT] = {12, 88, 164};
+static const int DISPLAY_LINE_START_Y[DISPLAY_LINE_COUNT] = {0, 88, 164};
 
 static bool s_initialized;
 static bool s_use_log_backend;
@@ -356,6 +358,9 @@ static void display_draw_wifi_sector_band(int x_offset, int y_offset, int inner_
             distance_squared = (dx * dx) + (dy * dy);
             if ((distance_squared >= inner_radius_squared) &&
                 (distance_squared <= outer_radius_squared)) {
+                if ((dx == 0) && (dy == outer_radius)) {
+                    continue;
+                }
                 display_buffer_set_pixel(origin_x + dx, origin_y - dy, color);
             }
         }
