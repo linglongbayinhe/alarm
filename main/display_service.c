@@ -36,17 +36,23 @@ static const char *DISPLAY_SPIFFS_PARTITION_LABEL = NULL;
 #define DISPLAY_COLOR_BLACK 0x0000
 #define DISPLAY_COLOR_RED 0xF800
 #define DISPLAY_STATUS_TEXT_BUFFER_SIZE 16
-#define DISPLAY_WIFI_ICON_SIZE 30
+#define DISPLAY_WIFI_ICON_SIZE 34
 #define DISPLAY_WIFI_ICON_MARGIN_RIGHT 10
 #define DISPLAY_WIFI_ICON_X (DISPLAY_WIDTH - DISPLAY_WIFI_ICON_SIZE - DISPLAY_WIFI_ICON_MARGIN_RIGHT)
 #define DISPLAY_WIFI_ICON_Y ((DISPLAY_LINE_HEIGHT - DISPLAY_WIFI_ICON_SIZE) / 2)
-#define DISPLAY_WIFI_ICON_ORIGIN_OFFSET_X 5
-#define DISPLAY_WIFI_ICON_ORIGIN_OFFSET_Y 25
-#define DISPLAY_WIFI_ICON_BAND_COUNT 4
-#define DISPLAY_WIFI_ICON_FIRST_OUTER_RADIUS 8
-#define DISPLAY_WIFI_ICON_RADIUS_STEP 5
-#define DISPLAY_WIFI_ICON_BAND_THICKNESS 3
-#define DISPLAY_WIFI_ICON_DOT_RADIUS 3
+/* Wi-Fi icon drawing origin X inside the icon box. Larger moves the fan right. */
+#define DISPLAY_WIFI_ICON_ORIGIN_OFFSET_X 16
+/* Wi-Fi icon drawing origin Y inside the icon box. Larger moves the fan downward. */
+#define DISPLAY_WIFI_ICON_ORIGIN_OFFSET_Y 28
+/* Total number of Wi-Fi signal bands used by the icon. */
+#define DISPLAY_WIFI_ICON_BAND_COUNT 3
+/* Outer radius of the innermost fan band. Larger makes the whole icon larger. */
+#define DISPLAY_WIFI_ICON_FIRST_OUTER_RADIUS 7
+/* Radius increment between adjacent bands. Larger increases spacing and overall spread. */
+#define DISPLAY_WIFI_ICON_RADIUS_STEP 4
+/* Thickness of each white Wi-Fi fan band. Larger makes each band bolder. */
+#define DISPLAY_WIFI_ICON_BAND_THICKNESS 2
+#define DISPLAY_WIFI_ICON_DOT_RADIUS 2
 #define DISPLAY_WIFI_ICON_SLASH_THICKNESS 4
 
 typedef struct {
@@ -323,7 +329,7 @@ static void display_draw_filled_circle(int center_x, int center_y, int radius, u
     }
 }
 
-/* Draws one quarter-ring Wi-Fi band so the icon becomes a 90-degree fan. */
+/* Draws one 90-degree fan band centered on the upward vertical axis. */
 static void display_draw_wifi_sector_band(int x_offset, int y_offset, int inner_radius, int outer_radius, uint16_t color)
 {
     int local_x = 0;
@@ -339,7 +345,10 @@ static void display_draw_wifi_sector_band(int x_offset, int y_offset, int inner_
             int dy = DISPLAY_WIFI_ICON_ORIGIN_OFFSET_Y - local_y;
             int distance_squared = 0;
 
-            if ((dx < 0) || (dy < 0)) {
+            if (dy < 0) {
+                continue;
+            }
+            if (display_abs_int(dx) > dy) {
                 continue;
             }
 
