@@ -36,6 +36,7 @@
 #include "rtc_service.h"
 #include "status_presenter.h"
 #include "time_service.h"
+#include "weather_mock_provider.h"
 
 #ifndef CONFIG_SOC_BLUFI_SUPPORTED
 #error "This SOC does not support BLUFI"
@@ -68,6 +69,9 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
 #define WIFI_LIST_NUM   10
 #define EXAMPLE_UI_TASK_STACK_SIZE 4096
 #define EXAMPLE_UI_TASK_PRIORITY   5
+/* Keep weather mock explicit so it can be disabled before wiring a real provider. */
+#define EXAMPLE_USE_WEATHER_MOCK   1
+#define EXAMPLE_WEATHER_MOCK_SCENARIO WEATHER_MOCK_SCENARIO_CLEAR_DAY
 
 static wifi_config_t sta_config;
 static wifi_config_t ap_config;
@@ -168,19 +172,6 @@ static bool example_get_wifi_rssi(int *rssi_out)
     return true;
 }
 
-/* Provides a fixed clear-day snapshot so the weather icon can be validated before HTTP integration exists. */
-static void example_fill_test_weather_snapshot(weather_snapshot_t *snapshot)
-{
-    if (snapshot == NULL) {
-        return;
-    }
-
-    memset(snapshot, 0, sizeof(*snapshot));
-    snapshot->state = WEATHER_DATA_STATE_READY;
-    snapshot->condition = WEATHER_CONDITION_CLEAR;
-    snapshot->is_daytime = true;
-}
-
 /* Collects raw runtime state once per second and delegates display mapping to the presenter layer. */
 static void example_ui_task(void *arg)
 {
@@ -189,6 +180,11 @@ static void example_ui_task(void *arg)
     esp_err_t ret = ESP_OK;
 
     (void)arg;
+
+#if EXAMPLE_USE_WEATHER_MOCK
+    weather_mock_provider_set_scenario(EXAMPLE_WEATHER_MOCK_SCENARIO);
+    BLUFI_INFO("Weather mock scenario=%d\n", (int)weather_mock_provider_get_scenario());
+#endif
 
     while (true) {
         if (time_service_take_sync_notification()) {
@@ -205,8 +201,15 @@ static void example_ui_task(void *arg)
             presenter_input.wifi_rssi_valid = example_get_wifi_rssi(&presenter_input.wifi_rssi);
         }
 
-        presenter_input.weather_snapshot_valid = true;
-        example_fill_test_weather_snapshot(&presenter_input.weather_snapshot);
+#if EXAMPLE_USE_WEATHER_MOCK
+        ret = weather_mock_provider_get_snapshot(&presenter_input.weather_snapshot);
+        presenter_input.weather_snapshot_valid = (ret == ESP_OK);
+        if (ret != ESP_OK) {
+            BLUFI_ERROR("Weather mock provider failed: %s\n", esp_err_to_name(ret));
+        }
+#else
+        presenter_input.weather_snapshot_valid = false;
+#endif
 
         if (presenter_input.time_valid) {
             ret = time_service_get_local_time(&presenter_input.current_time);

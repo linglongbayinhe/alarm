@@ -5,11 +5,10 @@
 
 #define DISPLAY_COLOR_SUN_YELLOW 0xFDC2
 
-#define WEATHER_ICON_SIZE 40
-#define WEATHER_SUN_CENTER_OFFSET_X 20
-#define WEATHER_SUN_CENTER_OFFSET_Y 20
-#define WEATHER_SUN_CORE_RADIUS 10
-#define WEATHER_SUN_RAY_THICKNESS 2
+#define WEATHER_ICON_BASE_SIZE 100
+#define WEATHER_SUN_CENTER_OFFSET_X (DISPLAY_WEATHER_ICON_RENDER_SIZE / 2)
+#define WEATHER_SUN_CENTER_OFFSET_Y (DISPLAY_WEATHER_ICON_RENDER_SIZE / 2)
+#define WEATHER_SUN_CORE_RADIUS (DISPLAY_WEATHER_ICON_RENDER_SIZE / 4)
 
 typedef struct {
     int start_x;
@@ -18,16 +17,30 @@ typedef struct {
     int end_y;
 } display_weather_ray_t;
 
+/* Coordinates use a 100x100 logical icon space and scale at draw time. */
 static const display_weather_ray_t WEATHER_SUN_RAYS[] = {
-    {20, 7, 20, 2},
-    {29, 11, 33, 7},
-    {33, 20, 38, 20},
-    {29, 29, 33, 33},
-    {20, 33, 20, 38},
-    {11, 29, 7, 33},
-    {7, 20, 2, 20},
-    {11, 11, 7, 7},
+    {50, 18, 50, 5},
+    {73, 28, 83, 18},
+    {83, 50, 95, 50},
+    {73, 73, 83, 83},
+    {50, 83, 50, 95},
+    {28, 73, 18, 83},
+    {18, 50, 5, 50},
+    {28, 28, 18, 18},
 };
+
+static int display_weather_icon_scale(int value)
+{
+    return ((value * DISPLAY_WEATHER_ICON_RENDER_SIZE) + (WEATHER_ICON_BASE_SIZE / 2)) /
+           WEATHER_ICON_BASE_SIZE;
+}
+
+static int display_weather_icon_line_thickness(void)
+{
+    int thickness = DISPLAY_WEATHER_ICON_RENDER_SIZE / 20;
+
+    return thickness < 1 ? 1 : thickness;
+}
 
 static int display_weather_icon_abs_int(int value)
 {
@@ -127,14 +140,24 @@ static void display_weather_icon_draw_clear_day(display_canvas_t *canvas, int x_
     size_t index = 0;
     int center_x = x_offset + WEATHER_SUN_CENTER_OFFSET_X;
     int center_y = y_offset + WEATHER_SUN_CENTER_OFFSET_Y;
+    int ray_thickness = display_weather_icon_line_thickness();
+    int ray_start_x = 0;
+    int ray_start_y = 0;
+    int ray_end_x = 0;
+    int ray_end_y = 0;
 
     for (index = 0; index < (sizeof(WEATHER_SUN_RAYS) / sizeof(WEATHER_SUN_RAYS[0])); ++index) {
+        ray_start_x = x_offset + display_weather_icon_scale(WEATHER_SUN_RAYS[index].start_x);
+        ray_start_y = y_offset + display_weather_icon_scale(WEATHER_SUN_RAYS[index].start_y);
+        ray_end_x = x_offset + display_weather_icon_scale(WEATHER_SUN_RAYS[index].end_x);
+        ray_end_y = y_offset + display_weather_icon_scale(WEATHER_SUN_RAYS[index].end_y);
+
         display_weather_icon_draw_thick_line(canvas,
-                                             x_offset + WEATHER_SUN_RAYS[index].start_x,
-                                             y_offset + WEATHER_SUN_RAYS[index].start_y,
-                                             x_offset + WEATHER_SUN_RAYS[index].end_x,
-                                             y_offset + WEATHER_SUN_RAYS[index].end_y,
-                                             WEATHER_SUN_RAY_THICKNESS,
+                                             ray_start_x,
+                                             ray_start_y,
+                                             ray_end_x,
+                                             ray_end_y,
+                                             ray_thickness,
                                              DISPLAY_COLOR_SUN_YELLOW);
     }
 
@@ -157,8 +180,8 @@ void display_weather_icon_renderer_draw(const display_weather_panel_t *panel,
         return;
     }
     if ((panel->icon != DISPLAY_WEATHER_ICON_KIND_CLEAR_DAY) ||
-        ((x_offset + WEATHER_ICON_SIZE) > canvas->width) ||
-        ((y_offset + WEATHER_ICON_SIZE) > canvas->height)) {
+        ((x_offset + DISPLAY_WEATHER_ICON_RENDER_SIZE) > canvas->width) ||
+        ((y_offset + DISPLAY_WEATHER_ICON_RENDER_SIZE) > canvas->height)) {
         return;
     }
 
