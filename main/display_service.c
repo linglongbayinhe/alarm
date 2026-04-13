@@ -8,6 +8,7 @@
 #include "driver/spi_master.h"
 #include "display_config.h"
 #include "display_status_icon_renderer.h"
+#include "display_weather_icon_renderer.h"
 #include "esp_heap_caps.h"
 #include "esp_check.h"
 #include "esp_lcd_io_spi.h"
@@ -27,9 +28,13 @@ static const char *DISPLAY_SPIFFS_PARTITION_LABEL = NULL;
 
 #define DISPLAY_CMD_BITS 8
 #define DISPLAY_PARAM_BITS 8
-#define DISPLAY_LINE_COUNT 3
-#define DISPLAY_LINE_HEIGHT 64
+#define DISPLAY_LINE_COUNT 4
+#define DISPLAY_LINE_HEIGHT 48
 #define DISPLAY_LINE_BUFFER_PIXELS (DISPLAY_WIDTH * DISPLAY_LINE_HEIGHT)
+#define DISPLAY_STATUS_REGION_INDEX 0
+#define DISPLAY_DATE_REGION_INDEX 1
+#define DISPLAY_TIME_REGION_INDEX 2
+#define DISPLAY_WEATHER_REGION_INDEX 3
 #define DISPLAY_DATE_SCALE 4
 #define DISPLAY_TIME_SCALE 5
 #define DISPLAY_DMA_WAIT_TIMEOUT_MS 1000
@@ -41,6 +46,9 @@ static const char *DISPLAY_SPIFFS_PARTITION_LABEL = NULL;
 #define DISPLAY_TOP_RIGHT_ICON_MARGIN_TOP 0
 #define DISPLAY_TOP_RIGHT_ICON_X (DISPLAY_WIDTH - DISPLAY_TOP_RIGHT_ICON_BOX_SIZE - DISPLAY_TOP_RIGHT_ICON_MARGIN_RIGHT)
 #define DISPLAY_TOP_RIGHT_ICON_Y DISPLAY_TOP_RIGHT_ICON_MARGIN_TOP
+#define DISPLAY_WEATHER_ICON_BOX_SIZE 40
+#define DISPLAY_WEATHER_ICON_X ((DISPLAY_WIDTH - DISPLAY_WEATHER_ICON_BOX_SIZE) / 2)
+#define DISPLAY_WEATHER_ICON_Y ((DISPLAY_LINE_HEIGHT - DISPLAY_WEATHER_ICON_BOX_SIZE) / 2)
 
 typedef struct {
     char ascii;
@@ -75,7 +83,7 @@ static const display_glyph_t DISPLAY_GLYPHS[] = {
     {'w', 5, {0x00, 0x00, 0x11, 0x15, 0x15, 0x15, 0x0A}},
 };
 
-static const int DISPLAY_LINE_START_Y[DISPLAY_LINE_COUNT] = {0, 88, 164};
+static const int DISPLAY_LINE_START_Y[DISPLAY_LINE_COUNT] = {0, 48, 104, 160};
 
 static bool s_initialized;
 static bool s_use_log_backend;
@@ -86,6 +94,8 @@ static SemaphoreHandle_t s_flush_done_sem;
 static esp_lcd_panel_io_handle_t s_panel_io;
 static esp_lcd_panel_handle_t s_panel;
 static display_status_icon_t s_last_top_right_icon;
+static bool s_last_weather_visible;
+static display_weather_icon_kind_t s_last_weather_icon;
 static bool s_last_time_valid;
 static struct tm s_last_time;
 
@@ -194,6 +204,21 @@ static void display_format_status_line(const display_status_icon_t *icon,
                  (unsigned int)icon->kind,
                  (unsigned int)icon->variant,
                  (unsigned int)icon->level);
+    }
+}
+
+/* Formats a textual representation of the current weather icon for log fallback. */
+static void display_format_weather_line(const display_weather_panel_t *panel,
+                                        char *weather_line,
+                                        size_t weather_line_size)
+{
+    if ((panel == NULL) || !panel->visible || (panel->icon == DISPLAY_WEATHER_ICON_KIND_NONE)) {
+        display_copy_line(weather_line, weather_line_size, "WEATHER HIDDEN");
+    } else {
+        snprintf(weather_line,
+                 weather_line_size,
+                 "WEATHER icon=%u",
+                 (unsigned int)panel->icon);
     }
 }
 
@@ -316,7 +341,27 @@ static esp_err_t display_render_status_icon_region(const display_status_icon_t *
                                       DISPLAY_TOP_RIGHT_ICON_X,
                                       DISPLAY_TOP_RIGHT_ICON_Y);
 
-    return display_push_line_buffer(0);
+    return display_push_line_buffer(DISPLAY_STATUS_REGION_INDEX);
+}
+
+/* Clears the dedicated weather region and draws one centered weather icon when requested. */
+static esp_err_t display_render_weather_region(const display_weather_panel_t *panel)
+{
+    display_canvas_t canvas = {
+        .pixels = s_line_buffer,
+        .width = DISPLAY_WIDTH,
+        .height = DISPLAY_LINE_HEIGHT,
+    };
+
+    display_buffer_fill(DISPLAY_COLOR_BLACK);
+    if ((panel != NULL) && panel->visible) {
+        display_weather_icon_renderer_draw(panel,
+                                           &canvas,
+                                           DISPLAY_WEATHER_ICON_X,
+                                           DISPLAY_WEATHER_ICON_Y);
+    }
+
+    return display_push_line_buffer(DISPLAY_WEATHER_REGION_INDEX);
 }
 
 
@@ -406,6 +451,11 @@ static esp_err_t display_init_hardware(void)
 #else
         .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
 #endif
+#if DISPLAY_RGB_DATA_ENDIAN_LITTLE
+        .data_endian = LCD_RGB_DATA_ENDIAN_LITTLE,
+#else
+        .data_endian = LCD_RGB_DATA_ENDIAN_BIG,
+#endif
         .bits_per_pixel = 16,
     };
     gpio_config_t backlight_config = {
@@ -465,7 +515,11 @@ static esp_err_t display_init_hardware(void)
     ESP_RETURN_ON_ERROR(display_clear_screen(), TAG, "Panel clear failed");
     gpio_set_level(DISPLAY_PIN_BACKLIGHT, DISPLAY_BACKLIGHT_ON_LEVEL);
 
-    ESP_LOGI(TAG, "ST7789 display initialized on project-local pin config");
+    ESP_LOGI(TAG,
+             "ST7789 display initialized on project-local pin config (order=%s, invert=%d, endian=%s)",
+             DISPLAY_RGB_ORDER_BGR ? "BGR" : "RGB",
+             DISPLAY_INVERT_COLOR ? 1 : 0,
+             DISPLAY_RGB_DATA_ENDIAN_LITTLE ? "LITTLE" : "BIG");
 
     return ESP_OK;
 }
@@ -479,6 +533,8 @@ esp_err_t display_service_init(void)
     s_backend_warning_logged = false;
     s_has_cached_view = false;
     memset(&s_last_top_right_icon, 0, sizeof(s_last_top_right_icon));
+    s_last_weather_visible = false;
+    s_last_weather_icon = DISPLAY_WEATHER_ICON_KIND_NONE;
     s_last_time_valid = false;
     memset(&s_last_time, 0, sizeof(s_last_time));
 
@@ -495,13 +551,17 @@ esp_err_t display_service_init(void)
     return ESP_OK;
 }
 
-/* Renders the current three-line view model and only updates changed lines. */
+/* Renders the current status/date/time/weather view model and only updates changed regions. */
 esp_err_t display_service_render(const display_view_model_t *view_model)
 {
     char status_line[DISPLAY_STATUS_TEXT_BUFFER_SIZE];
     char date_line[16];
     char time_line[16];
+    char weather_line[DISPLAY_STATUS_TEXT_BUFFER_SIZE];
+    bool status_icon_changed = false;
     bool time_unchanged = false;
+    bool time_changed = false;
+    bool weather_changed = false;
     esp_err_t ret = ESP_OK;
 
     if (!s_initialized) {
@@ -517,16 +577,23 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
                               sizeof(date_line),
                               time_line,
                               sizeof(time_line));
+    display_format_weather_line(&view_model->weather_panel, weather_line, sizeof(weather_line));
 
     time_unchanged = (!view_model->time_valid && !s_last_time_valid) ||
                      (view_model->time_valid &&
                       s_last_time_valid &&
                       display_time_equals(&view_model->current_time, &s_last_time));
 
-    if (s_has_cached_view &&
-        display_status_icon_equals(&view_model->top_right_icon, &s_last_top_right_icon) &&
-        (view_model->time_valid == s_last_time_valid) &&
-        time_unchanged) {
+    status_icon_changed = !s_has_cached_view ||
+                          !display_status_icon_equals(&view_model->top_right_icon, &s_last_top_right_icon);
+    time_changed = !s_has_cached_view ||
+                   (view_model->time_valid != s_last_time_valid) ||
+                   !time_unchanged;
+    weather_changed = !s_has_cached_view ||
+                      (view_model->weather_panel.visible != s_last_weather_visible) ||
+                      (view_model->weather_panel.icon != s_last_weather_icon);
+
+    if (!status_icon_changed && !time_changed && !weather_changed) {
         return ESP_OK;
     }
 
@@ -535,16 +602,28 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
             ESP_LOGW(TAG, "Using log renderer because TFT backend is unavailable");
             s_backend_warning_logged = true;
         }
-        ESP_LOGI(TAG, "Screen line1: %s", status_line);
-        ESP_LOGI(TAG, "Screen line2: %s", date_line);
-        ESP_LOGI(TAG, "Screen line3: %s", time_line);
-    } else {
-        ret = display_render_status_icon_region(&view_model->top_right_icon);
-        if (ret == ESP_OK) {
-            ret = display_render_line_region(1, date_line, DISPLAY_DATE_SCALE);
+        if (status_icon_changed) {
+            ESP_LOGI(TAG, "Screen line1: %s", status_line);
         }
-        if (ret == ESP_OK) {
-            ret = display_render_line_region(2, time_line, DISPLAY_TIME_SCALE);
+        if (time_changed) {
+            ESP_LOGI(TAG, "Screen line2: %s", date_line);
+            ESP_LOGI(TAG, "Screen line3: %s", time_line);
+        }
+        if (weather_changed) {
+            ESP_LOGI(TAG, "Screen line4: %s", weather_line);
+        }
+    } else {
+        if (status_icon_changed) {
+            ret = display_render_status_icon_region(&view_model->top_right_icon);
+        }
+        if ((ret == ESP_OK) && time_changed) {
+            ret = display_render_line_region(DISPLAY_DATE_REGION_INDEX, date_line, DISPLAY_DATE_SCALE);
+        }
+        if ((ret == ESP_OK) && time_changed) {
+            ret = display_render_line_region(DISPLAY_TIME_REGION_INDEX, time_line, DISPLAY_TIME_SCALE);
+        }
+        if ((ret == ESP_OK) && weather_changed) {
+            ret = display_render_weather_region(&view_model->weather_panel);
         }
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "LCD update failed: %s", esp_err_to_name(ret));
@@ -554,6 +633,8 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
 
     s_has_cached_view = true;
     s_last_top_right_icon = view_model->top_right_icon;
+    s_last_weather_visible = view_model->weather_panel.visible;
+    s_last_weather_icon = view_model->weather_panel.icon;
     s_last_time_valid = view_model->time_valid;
     if (view_model->time_valid) {
         s_last_time = view_model->current_time;

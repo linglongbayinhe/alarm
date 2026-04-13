@@ -24,8 +24,42 @@ typedef struct {
     uint8_t level;
 } display_status_icon_t;
 
+#define DISPLAY_WEATHER_TEMPERATURE_TEXT_SIZE 8
+#define DISPLAY_WEATHER_CONDITION_TEXT_SIZE  16
+#define DISPLAY_WEATHER_DETAILS_TEXT_SIZE    24
+#define DISPLAY_WEATHER_FOOTER_TEXT_SIZE     24
+
+typedef enum {
+    DISPLAY_WEATHER_ICON_KIND_NONE = 0,
+    DISPLAY_WEATHER_ICON_KIND_UNKNOWN = 1,
+    DISPLAY_WEATHER_ICON_KIND_CLEAR_DAY = 2,
+    DISPLAY_WEATHER_ICON_KIND_CLEAR_NIGHT = 3,
+    DISPLAY_WEATHER_ICON_KIND_PARTLY_CLOUDY_DAY = 4,
+    DISPLAY_WEATHER_ICON_KIND_PARTLY_CLOUDY_NIGHT = 5,
+    DISPLAY_WEATHER_ICON_KIND_CLOUDY = 6,
+    DISPLAY_WEATHER_ICON_KIND_OVERCAST = 7,
+    DISPLAY_WEATHER_ICON_KIND_LIGHT_RAIN = 8,
+    DISPLAY_WEATHER_ICON_KIND_RAIN = 9,
+    DISPLAY_WEATHER_ICON_KIND_THUNDERSTORM = 10,
+    DISPLAY_WEATHER_ICON_KIND_SNOW = 11,
+    DISPLAY_WEATHER_ICON_KIND_FOG = 12,
+    DISPLAY_WEATHER_ICON_KIND_WINDY = 13,
+} display_weather_icon_kind_t;
+
+typedef struct {
+    bool visible;
+    bool stale;
+    bool show_condition_text;
+    display_weather_icon_kind_t icon;
+    char temperature_text[DISPLAY_WEATHER_TEMPERATURE_TEXT_SIZE];
+    char condition_text[DISPLAY_WEATHER_CONDITION_TEXT_SIZE];
+    char details_text[DISPLAY_WEATHER_DETAILS_TEXT_SIZE];
+    char footer_text[DISPLAY_WEATHER_FOOTER_TEXT_SIZE];
+} display_weather_panel_t;
+
 typedef struct {
     display_status_icon_t top_right_icon;
+    display_weather_panel_t weather_panel;
     bool time_valid;
     struct tm current_time;
 } display_view_model_t;

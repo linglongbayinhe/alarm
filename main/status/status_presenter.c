@@ -2,11 +2,14 @@
 
 #include <string.h>
 
+#include "weather_presenter.h"
 #include "wifi_signal_mapper.h"
 
 esp_err_t status_presenter_build_display_model(const status_presenter_input_t *input,
                                                display_view_model_t *output)
 {
+    esp_err_t ret = ESP_OK;
+
     if ((input == NULL) || (output == NULL)) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -28,6 +31,14 @@ esp_err_t status_presenter_build_display_model(const status_presenter_input_t *i
     output->time_valid = input->time_valid;
     if (input->time_valid) {
         output->current_time = input->current_time;
+    }
+
+    if (input->weather_snapshot_valid) {
+        ret = weather_presenter_build_panel_model(&input->weather_snapshot,
+                                                  &output->weather_panel);
+        if (ret != ESP_OK) {
+            return ret;
+        }
     }
 
     return ESP_OK;

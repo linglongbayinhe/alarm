@@ -168,6 +168,19 @@ static bool example_get_wifi_rssi(int *rssi_out)
     return true;
 }
 
+/* Provides a fixed clear-day snapshot so the weather icon can be validated before HTTP integration exists. */
+static void example_fill_test_weather_snapshot(weather_snapshot_t *snapshot)
+{
+    if (snapshot == NULL) {
+        return;
+    }
+
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->state = WEATHER_DATA_STATE_READY;
+    snapshot->condition = WEATHER_CONDITION_CLEAR;
+    snapshot->is_daytime = true;
+}
+
 /* Collects raw runtime state once per second and delegates display mapping to the presenter layer. */
 static void example_ui_task(void *arg)
 {
@@ -191,6 +204,9 @@ static void example_ui_task(void *arg)
         if (presenter_input.wifi_connected) {
             presenter_input.wifi_rssi_valid = example_get_wifi_rssi(&presenter_input.wifi_rssi);
         }
+
+        presenter_input.weather_snapshot_valid = true;
+        example_fill_test_weather_snapshot(&presenter_input.weather_snapshot);
 
         if (presenter_input.time_valid) {
             ret = time_service_get_local_time(&presenter_input.current_time);
