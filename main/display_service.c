@@ -89,18 +89,18 @@ static const display_glyph_t DISPLAY_GLYPHS[] = {
 
 static const int DISPLAY_LINE_START_Y[DISPLAY_LINE_COUNT] = {0, 48, 104, 160};
 
-static const display_weather_icon_kind_t DISPLAY_WEATHER_GALLERY_ROW_ONE[] = {
-    DISPLAY_WEATHER_ICON_KIND_CLEAR_DAY,
-    DISPLAY_WEATHER_ICON_KIND_CLEAR_NIGHT,
-    DISPLAY_WEATHER_ICON_KIND_CLOUDY,
-    DISPLAY_WEATHER_ICON_KIND_RAIN,
+static const weather_icon_kind_t DISPLAY_WEATHER_GALLERY_ROW_ONE[] = {
+    WEATHER_ICON_CLEAR_DAY,
+    WEATHER_ICON_CLEAR_NIGHT,
+    WEATHER_ICON_CLOUDY_DAY,
+    WEATHER_ICON_CLOUDY_NIGHT,
 };
 
-static const display_weather_icon_kind_t DISPLAY_WEATHER_GALLERY_ROW_TWO[] = {
-    DISPLAY_WEATHER_ICON_KIND_THUNDERSTORM,
-    DISPLAY_WEATHER_ICON_KIND_LOADING,
-    DISPLAY_WEATHER_ICON_KIND_SNOW,
-    DISPLAY_WEATHER_ICON_KIND_FOG,
+static const weather_icon_kind_t DISPLAY_WEATHER_GALLERY_ROW_TWO[] = {
+    WEATHER_ICON_LIGHT_RAIN,
+    WEATHER_ICON_MODERATE_RAIN,
+    WEATHER_ICON_HEAVY_RAIN,
+    WEATHER_ICON_THUNDERSTORM,
 };
 
 static bool s_initialized;
@@ -113,7 +113,7 @@ static esp_lcd_panel_io_handle_t s_panel_io;
 static esp_lcd_panel_handle_t s_panel;
 static display_status_icon_t s_last_top_right_icon;
 static bool s_last_weather_visible;
-static display_weather_icon_kind_t s_last_weather_icon;
+static weather_icon_kind_t s_last_weather_icon;
 static bool s_last_time_valid;
 static struct tm s_last_time;
 
@@ -238,7 +238,7 @@ static void display_format_weather_line(const display_weather_panel_t *panel,
                                         char *weather_line,
                                         size_t weather_line_size)
 {
-    if ((panel == NULL) || !panel->visible || (panel->icon == DISPLAY_WEATHER_ICON_KIND_NONE)) {
+    if ((panel == NULL) || !panel->visible) {
         display_copy_line(weather_line, weather_line_size, "WEATHER HIDDEN");
     } else {
         snprintf(weather_line,
@@ -383,7 +383,7 @@ static esp_err_t display_render_status_date_region(const display_status_icon_t *
 
 /* Draws one row of the weather icon gallery for visual validation. */
 static esp_err_t display_render_weather_gallery_region(int line_index,
-                                                       const display_weather_icon_kind_t *icons,
+                                                       const weather_icon_kind_t *icons,
                                                        size_t icon_count)
 {
     display_canvas_t canvas = {
@@ -604,7 +604,7 @@ esp_err_t display_service_init(void)
     s_has_cached_view = false;
     memset(&s_last_top_right_icon, 0, sizeof(s_last_top_right_icon));
     s_last_weather_visible = false;
-    s_last_weather_icon = DISPLAY_WEATHER_ICON_KIND_NONE;
+    s_last_weather_icon = WEATHER_ICON_UNKNOWN;
     s_last_time_valid = false;
     memset(&s_last_time, 0, sizeof(s_last_time));
 

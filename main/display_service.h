@@ -6,6 +6,7 @@
 #include <time.h>
 
 #include "esp_err.h"
+#include "display_weather_icon_types.h"
 
 typedef enum {
     DISPLAY_STATUS_ICON_KIND_NONE = 0,
@@ -29,29 +30,11 @@ typedef struct {
 #define DISPLAY_WEATHER_DETAILS_TEXT_SIZE    24
 #define DISPLAY_WEATHER_FOOTER_TEXT_SIZE     24
 
-typedef enum {
-    DISPLAY_WEATHER_ICON_KIND_NONE = 0,
-    DISPLAY_WEATHER_ICON_KIND_UNKNOWN = 1,
-    DISPLAY_WEATHER_ICON_KIND_CLEAR_DAY = 2,
-    DISPLAY_WEATHER_ICON_KIND_CLEAR_NIGHT = 3,
-    DISPLAY_WEATHER_ICON_KIND_PARTLY_CLOUDY_DAY = 4,
-    DISPLAY_WEATHER_ICON_KIND_PARTLY_CLOUDY_NIGHT = 5,
-    DISPLAY_WEATHER_ICON_KIND_CLOUDY = 6,
-    DISPLAY_WEATHER_ICON_KIND_OVERCAST = 7,
-    DISPLAY_WEATHER_ICON_KIND_LIGHT_RAIN = 8,
-    DISPLAY_WEATHER_ICON_KIND_RAIN = 9,
-    DISPLAY_WEATHER_ICON_KIND_THUNDERSTORM = 10,
-    DISPLAY_WEATHER_ICON_KIND_SNOW = 11,
-    DISPLAY_WEATHER_ICON_KIND_FOG = 12,
-    DISPLAY_WEATHER_ICON_KIND_WINDY = 13,
-    DISPLAY_WEATHER_ICON_KIND_LOADING = 14,
-} display_weather_icon_kind_t;
-
-typedef struct {
+typedef struct display_weather_panel {
     bool visible;
     bool stale;
     bool show_condition_text;
-    display_weather_icon_kind_t icon;
+    weather_icon_kind_t icon;
     char temperature_text[DISPLAY_WEATHER_TEMPERATURE_TEXT_SIZE];
     char condition_text[DISPLAY_WEATHER_CONDITION_TEXT_SIZE];
     char details_text[DISPLAY_WEATHER_DETAILS_TEXT_SIZE];

@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "display_service.h"
+
 #define DISPLAY_COLOR_SUN_YELLOW 0xFDC2
 #define DISPLAY_COLOR_WHITE 0xFFFF
 #define DISPLAY_COLOR_MOON DISPLAY_COLOR_SUN_YELLOW
@@ -67,7 +69,7 @@ static const display_weather_point_t WEATHER_MOON_TRIM_POINTS[] = {
     {82, 70},
 };
 
-static const display_weather_ray_t WEATHER_PARTLY_CLOUDY_SUN_RAYS[] = {
+static const display_weather_ray_t WEATHER_CLOUDY_SUN_RAYS[] = {
     {34, 24, 34, 13},
     {49, 31, 58, 22},
     {54, 45, 66, 45},
@@ -395,15 +397,15 @@ static void display_weather_icon_draw_cloudy(display_canvas_t *canvas, int x_off
     size_t index = 0;
 
     for (index = 0;
-         index < (sizeof(WEATHER_PARTLY_CLOUDY_SUN_RAYS) / sizeof(WEATHER_PARTLY_CLOUDY_SUN_RAYS[0]));
+         index < (sizeof(WEATHER_CLOUDY_SUN_RAYS) / sizeof(WEATHER_CLOUDY_SUN_RAYS[0]));
          ++index) {
         display_weather_icon_draw_scaled_round_line(canvas,
                                                     x_offset,
                                                     y_offset,
-                                                    WEATHER_PARTLY_CLOUDY_SUN_RAYS[index].start_x,
-                                                    WEATHER_PARTLY_CLOUDY_SUN_RAYS[index].start_y,
-                                                    WEATHER_PARTLY_CLOUDY_SUN_RAYS[index].end_x,
-                                                    WEATHER_PARTLY_CLOUDY_SUN_RAYS[index].end_y,
+                                                    WEATHER_CLOUDY_SUN_RAYS[index].start_x,
+                                                    WEATHER_CLOUDY_SUN_RAYS[index].start_y,
+                                                    WEATHER_CLOUDY_SUN_RAYS[index].end_x,
+                                                    WEATHER_CLOUDY_SUN_RAYS[index].end_y,
                                                     5,
                                                     DISPLAY_COLOR_SUN_YELLOW);
     }
@@ -452,13 +454,6 @@ static void display_weather_icon_draw_fog(display_canvas_t *canvas, int x_offset
     display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 28, 96, 72, 96, 5, DISPLAY_COLOR_CLOUD_DARK);
 }
 
-static void display_weather_icon_draw_loading(display_canvas_t *canvas, int x_offset, int y_offset)
-{
-    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 34, 50, 7, DISPLAY_COLOR_CLOUD_DARK);
-    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 50, 50, 7, DISPLAY_COLOR_CLOUD_LIGHT);
-    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 66, 50, 7, DISPLAY_COLOR_CLOUD_DARK);
-}
-
 static void display_weather_icon_draw_unknown(display_canvas_t *canvas, int x_offset, int y_offset)
 {
     display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 50, 25, 50, 62, 8, DISPLAY_COLOR_ERROR_RED);
@@ -473,7 +468,7 @@ void display_weather_icon_renderer_draw(const display_weather_panel_t *panel,
     if ((panel == NULL) || (canvas == NULL) || (canvas->pixels == NULL)) {
         return;
     }
-    if (!panel->visible || (panel->icon == DISPLAY_WEATHER_ICON_KIND_NONE)) {
+    if (!panel->visible) {
         return;
     }
     if (((x_offset + DISPLAY_WEATHER_ICON_RENDER_SIZE) > canvas->width) ||
@@ -482,38 +477,38 @@ void display_weather_icon_renderer_draw(const display_weather_panel_t *panel,
     }
 
     switch (panel->icon) {
-        case DISPLAY_WEATHER_ICON_KIND_CLEAR_DAY:
+        case WEATHER_ICON_CLEAR_DAY:
             display_weather_icon_draw_clear_day(canvas, x_offset, y_offset);
             break;
-        case DISPLAY_WEATHER_ICON_KIND_CLEAR_NIGHT:
+        case WEATHER_ICON_CLEAR_NIGHT:
             display_weather_icon_draw_clear_night(canvas, x_offset, y_offset);
             break;
-        case DISPLAY_WEATHER_ICON_KIND_PARTLY_CLOUDY_DAY:
-        case DISPLAY_WEATHER_ICON_KIND_PARTLY_CLOUDY_NIGHT:
-        case DISPLAY_WEATHER_ICON_KIND_CLOUDY:
+        case WEATHER_ICON_CLOUDY_DAY:
+        case WEATHER_ICON_CLOUDY_NIGHT:
             display_weather_icon_draw_cloudy(canvas, x_offset, y_offset);
             break;
-        case DISPLAY_WEATHER_ICON_KIND_OVERCAST:
+        case WEATHER_ICON_OVERCAST:
             display_weather_icon_draw_overcast(canvas, x_offset, y_offset);
             break;
-        case DISPLAY_WEATHER_ICON_KIND_LIGHT_RAIN:
-        case DISPLAY_WEATHER_ICON_KIND_RAIN:
+        case WEATHER_ICON_LIGHT_RAIN:
+        case WEATHER_ICON_MODERATE_RAIN:
+        case WEATHER_ICON_HEAVY_RAIN:
+        case WEATHER_ICON_SHOWER:
             display_weather_icon_draw_rain(canvas, x_offset, y_offset);
             break;
-        case DISPLAY_WEATHER_ICON_KIND_THUNDERSTORM:
+        case WEATHER_ICON_THUNDERSTORM:
             display_weather_icon_draw_thunderstorm(canvas, x_offset, y_offset);
             break;
-        case DISPLAY_WEATHER_ICON_KIND_SNOW:
+        case WEATHER_ICON_SNOW:
             display_weather_icon_draw_snow(canvas, x_offset, y_offset);
             break;
-        case DISPLAY_WEATHER_ICON_KIND_FOG:
-        case DISPLAY_WEATHER_ICON_KIND_WINDY:
+        case WEATHER_ICON_FOG:
+        case WEATHER_ICON_HAZE:
+        case WEATHER_ICON_DUST_STORM:
+        case WEATHER_ICON_WINDY:
             display_weather_icon_draw_fog(canvas, x_offset, y_offset);
             break;
-        case DISPLAY_WEATHER_ICON_KIND_LOADING:
-            display_weather_icon_draw_loading(canvas, x_offset, y_offset);
-            break;
-        case DISPLAY_WEATHER_ICON_KIND_UNKNOWN:
+        case WEATHER_ICON_UNKNOWN:
         default:
             display_weather_icon_draw_unknown(canvas, x_offset, y_offset);
             break;

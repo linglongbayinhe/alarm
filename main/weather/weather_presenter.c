@@ -9,36 +9,35 @@ static void weather_presenter_copy_text(char *destination, size_t destination_si
     snprintf(destination, destination_size, "%s", source);
 }
 
-static display_weather_icon_kind_t weather_presenter_map_icon(const weather_snapshot_t *snapshot)
+static weather_icon_kind_t weather_presenter_map_icon(const weather_snapshot_t *snapshot)
 {
     switch (snapshot->condition) {
         case WEATHER_CONDITION_CLEAR:
             return snapshot->is_daytime ?
-                   DISPLAY_WEATHER_ICON_KIND_CLEAR_DAY :
-                   DISPLAY_WEATHER_ICON_KIND_CLEAR_NIGHT;
+                   WEATHER_ICON_CLEAR_DAY :
+                   WEATHER_ICON_CLEAR_NIGHT;
         case WEATHER_CONDITION_PARTLY_CLOUDY:
-            return snapshot->is_daytime ?
-                   DISPLAY_WEATHER_ICON_KIND_PARTLY_CLOUDY_DAY :
-                   DISPLAY_WEATHER_ICON_KIND_PARTLY_CLOUDY_NIGHT;
         case WEATHER_CONDITION_CLOUDY:
-            return DISPLAY_WEATHER_ICON_KIND_CLOUDY;
+            return snapshot->is_daytime ?
+                   WEATHER_ICON_CLOUDY_DAY :
+                   WEATHER_ICON_CLOUDY_NIGHT;
         case WEATHER_CONDITION_OVERCAST:
-            return DISPLAY_WEATHER_ICON_KIND_OVERCAST;
+            return WEATHER_ICON_OVERCAST;
         case WEATHER_CONDITION_LIGHT_RAIN:
-            return DISPLAY_WEATHER_ICON_KIND_LIGHT_RAIN;
+            return WEATHER_ICON_LIGHT_RAIN;
         case WEATHER_CONDITION_RAIN:
-            return DISPLAY_WEATHER_ICON_KIND_RAIN;
+            return WEATHER_ICON_MODERATE_RAIN;
         case WEATHER_CONDITION_THUNDERSTORM:
-            return DISPLAY_WEATHER_ICON_KIND_THUNDERSTORM;
+            return WEATHER_ICON_THUNDERSTORM;
         case WEATHER_CONDITION_SNOW:
-            return DISPLAY_WEATHER_ICON_KIND_SNOW;
+            return WEATHER_ICON_SNOW;
         case WEATHER_CONDITION_FOG:
-            return DISPLAY_WEATHER_ICON_KIND_FOG;
+            return WEATHER_ICON_FOG;
         case WEATHER_CONDITION_WINDY:
-            return DISPLAY_WEATHER_ICON_KIND_WINDY;
+            return WEATHER_ICON_WINDY;
         case WEATHER_CONDITION_UNKNOWN:
         default:
-            return DISPLAY_WEATHER_ICON_KIND_UNKNOWN;
+            return WEATHER_ICON_UNKNOWN;
     }
 }
 
@@ -210,7 +209,7 @@ esp_err_t weather_presenter_build_panel_model(const weather_snapshot_t *snapshot
     output->show_condition_text = weather_presenter_should_show_condition_text(snapshot);
 
     if (snapshot->state == WEATHER_DATA_STATE_LOADING) {
-        output->icon = DISPLAY_WEATHER_ICON_KIND_LOADING;
+        output->icon = WEATHER_ICON_UNKNOWN;
         weather_presenter_copy_text(output->temperature_text,
                                     sizeof(output->temperature_text),
                                     "--");
@@ -224,7 +223,7 @@ esp_err_t weather_presenter_build_panel_model(const weather_snapshot_t *snapshot
     }
 
     if (snapshot->state == WEATHER_DATA_STATE_ERROR) {
-        output->icon = DISPLAY_WEATHER_ICON_KIND_UNKNOWN;
+        output->icon = WEATHER_ICON_UNKNOWN;
         weather_presenter_copy_text(output->temperature_text,
                                     sizeof(output->temperature_text),
                                     "--");
