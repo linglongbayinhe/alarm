@@ -71,7 +71,7 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
 #define EXAMPLE_UI_TASK_PRIORITY   5
 /* Keep weather mock explicit so it can be disabled before wiring a real provider. */
 #define EXAMPLE_USE_WEATHER_MOCK   1
-#define EXAMPLE_WEATHER_MOCK_SCENARIO WEATHER_MOCK_SCENARIO_CLEAR_DAY
+#define EXAMPLE_WEATHER_MOCK_SCENARIO WEATHER_MOCK_CLEAR_DAY
 
 static wifi_config_t sta_config;
 static wifi_config_t ap_config;

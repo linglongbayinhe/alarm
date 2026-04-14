@@ -149,7 +149,7 @@ static void display_status_icon_draw_thick_line(display_canvas_t *canvas,
     }
 }
 
-static uint8_t display_status_icon_get_wifi_band_count(const display_status_icon_t *icon)
+static uint8_t display_status_icon_get_wifi_band_count(const display_wifi_status_icon_t *icon)
 {
     if (icon->level == 0U) {
         return WIFI_STATUS_ICON_BAND_COUNT;
@@ -161,7 +161,7 @@ static uint8_t display_status_icon_get_wifi_band_count(const display_status_icon
     return icon->level;
 }
 
-static void display_status_icon_draw_wifi_base(const display_status_icon_t *icon,
+static void display_status_icon_draw_wifi_base(const display_wifi_status_icon_t *icon,
                                                display_canvas_t *canvas,
                                                int x_offset,
                                                int y_offset)
@@ -211,7 +211,7 @@ static void display_status_icon_draw_wifi_alert_overlay(display_canvas_t *canvas
                                         DISPLAY_COLOR_RED);
 }
 
-void display_status_icon_renderer_draw(const display_status_icon_t *icon,
+void display_status_icon_renderer_draw(const display_wifi_status_icon_t *icon,
                                        display_canvas_t *canvas,
                                        int x_offset,
                                        int y_offset)

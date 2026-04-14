@@ -11,57 +11,45 @@ static void weather_presenter_copy_text(char *destination, size_t destination_si
 
 static weather_icon_kind_t weather_presenter_map_icon(const weather_snapshot_t *snapshot)
 {
-    switch (snapshot->condition) {
-        case WEATHER_CONDITION_CLEAR:
-            return snapshot->is_daytime ?
-                   WEATHER_ICON_CLEAR_DAY :
-                   WEATHER_ICON_CLEAR_NIGHT;
-        case WEATHER_CONDITION_PARTLY_CLOUDY:
-        case WEATHER_CONDITION_CLOUDY:
-            return snapshot->is_daytime ?
-                   WEATHER_ICON_CLOUDY_DAY :
-                   WEATHER_ICON_CLOUDY_NIGHT;
-        case WEATHER_CONDITION_OVERCAST:
-            return WEATHER_ICON_OVERCAST;
-        case WEATHER_CONDITION_LIGHT_RAIN:
-            return WEATHER_ICON_LIGHT_RAIN;
-        case WEATHER_CONDITION_RAIN:
-            return WEATHER_ICON_MODERATE_RAIN;
-        case WEATHER_CONDITION_THUNDERSTORM:
-            return WEATHER_ICON_THUNDERSTORM;
-        case WEATHER_CONDITION_SNOW:
-            return WEATHER_ICON_SNOW;
-        case WEATHER_CONDITION_FOG:
-            return WEATHER_ICON_FOG;
-        case WEATHER_CONDITION_WINDY:
-            return WEATHER_ICON_WINDY;
-        case WEATHER_CONDITION_UNKNOWN:
-        default:
-            return WEATHER_ICON_UNKNOWN;
+    if ((snapshot->condition < WEATHER_CONDITION_UNKNOWN) ||
+        (snapshot->condition > WEATHER_CONDITION_WINDY)) {
+        return WEATHER_ICON_UNKNOWN;
     }
+
+    return (weather_icon_kind_t)snapshot->condition;
 }
 
 static const char *weather_presenter_condition_text(weather_condition_t condition)
 {
     switch (condition) {
-        case WEATHER_CONDITION_CLEAR:
-            return "CLEAR";
-        case WEATHER_CONDITION_PARTLY_CLOUDY:
-            return "PART CLOUD";
-        case WEATHER_CONDITION_CLOUDY:
-            return "CLOUDY";
+        case WEATHER_CONDITION_CLEAR_DAY:
+            return "CLEAR DAY";
+        case WEATHER_CONDITION_CLEAR_NIGHT:
+            return "CLEAR NIGHT";
+        case WEATHER_CONDITION_CLOUDY_DAY:
+            return "CLOUDY DAY";
+        case WEATHER_CONDITION_CLOUDY_NIGHT:
+            return "CLOUDY NIGHT";
         case WEATHER_CONDITION_OVERCAST:
             return "OVERCAST";
         case WEATHER_CONDITION_LIGHT_RAIN:
             return "LIGHT RAIN";
-        case WEATHER_CONDITION_RAIN:
-            return "RAIN";
+        case WEATHER_CONDITION_MODERATE_RAIN:
+            return "MODERATE RAIN";
+        case WEATHER_CONDITION_HEAVY_RAIN:
+            return "HEAVY RAIN";
+        case WEATHER_CONDITION_SHOWER:
+            return "SHOWER";
         case WEATHER_CONDITION_THUNDERSTORM:
-            return "STORM";
+            return "THUNDERSTORM";
         case WEATHER_CONDITION_SNOW:
             return "SNOW";
         case WEATHER_CONDITION_FOG:
             return "FOG";
+        case WEATHER_CONDITION_HAZE:
+            return "HAZE";
+        case WEATHER_CONDITION_DUST_STORM:
+            return "DUST STORM";
         case WEATHER_CONDITION_WINDY:
             return "WINDY";
         case WEATHER_CONDITION_UNKNOWN:
@@ -79,16 +67,21 @@ static bool weather_presenter_should_show_condition_text(const weather_snapshot_
 
     switch (snapshot->condition) {
         case WEATHER_CONDITION_LIGHT_RAIN:
-        case WEATHER_CONDITION_RAIN:
+        case WEATHER_CONDITION_MODERATE_RAIN:
+        case WEATHER_CONDITION_HEAVY_RAIN:
+        case WEATHER_CONDITION_SHOWER:
         case WEATHER_CONDITION_THUNDERSTORM:
         case WEATHER_CONDITION_SNOW:
         case WEATHER_CONDITION_FOG:
+        case WEATHER_CONDITION_HAZE:
+        case WEATHER_CONDITION_DUST_STORM:
         case WEATHER_CONDITION_WINDY:
         case WEATHER_CONDITION_UNKNOWN:
             return true;
-        case WEATHER_CONDITION_CLEAR:
-        case WEATHER_CONDITION_PARTLY_CLOUDY:
-        case WEATHER_CONDITION_CLOUDY:
+        case WEATHER_CONDITION_CLEAR_DAY:
+        case WEATHER_CONDITION_CLEAR_NIGHT:
+        case WEATHER_CONDITION_CLOUDY_DAY:
+        case WEATHER_CONDITION_CLOUDY_NIGHT:
         case WEATHER_CONDITION_OVERCAST:
         default:
             return false;

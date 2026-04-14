@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "display_service.h"
+#include "display_view_model.h"
 
 #define DISPLAY_COLOR_SUN_YELLOW 0xFDC2
 #define DISPLAY_COLOR_WHITE 0xFFFF

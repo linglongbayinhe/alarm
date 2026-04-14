@@ -1,7 +1,7 @@
 #ifndef WEATHER_PRESENTER_H
 #define WEATHER_PRESENTER_H
 
-#include "display_service.h"
+#include "display_view_model.h"
 #include "esp_err.h"
 #include "weather_types.h"
 

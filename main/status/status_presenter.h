@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <time.h>
 
-#include "display_service.h"
+#include "display_view_model.h"
 #include "esp_err.h"
 #include "weather_types.h"
 

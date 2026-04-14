@@ -2,7 +2,6 @@
 #define DISPLAY_WEATHER_ICON_RENDERER_H
 
 #include "display_canvas.h"
-#include "display_weather_icon_types.h"
 
 #define DISPLAY_WEATHER_ICON_RENDER_SIZE 40
 

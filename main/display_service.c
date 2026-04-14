@@ -111,7 +111,7 @@ static uint16_t *s_line_buffer;
 static SemaphoreHandle_t s_flush_done_sem;
 static esp_lcd_panel_io_handle_t s_panel_io;
 static esp_lcd_panel_handle_t s_panel;
-static display_status_icon_t s_last_top_right_icon;
+static display_wifi_status_icon_t s_last_top_right_icon;
 static bool s_last_weather_visible;
 static weather_icon_kind_t s_last_weather_icon;
 static bool s_last_time_valid;
@@ -207,8 +207,8 @@ static bool display_date_equals(const struct tm *left, const struct tm *right)
 }
 
 /* Compares the cached top-right icon state used for partial redraw decisions. */
-static bool display_status_icon_equals(const display_status_icon_t *left,
-                                       const display_status_icon_t *right)
+static bool display_status_icon_equals(const display_wifi_status_icon_t *left,
+                                       const display_wifi_status_icon_t *right)
 {
     return (left->visible == right->visible) &&
            (left->kind == right->kind) &&
@@ -217,7 +217,7 @@ static bool display_status_icon_equals(const display_status_icon_t *left,
 }
 
 /* Formats a textual representation of the generic top-right icon state for log fallback. */
-static void display_format_status_line(const display_status_icon_t *icon,
+static void display_format_status_line(const display_wifi_status_icon_t *icon,
                                        char *status_line,
                                        size_t status_line_size)
 {
@@ -353,7 +353,7 @@ static void display_draw_ascii_text(const char *text, int scale, int x_offset, i
 }
 
 /* Clears the top region, draws the compact date and keeps the Wi-Fi icon at top right. */
-static esp_err_t display_render_status_date_region(const display_status_icon_t *icon, const char *date_line)
+static esp_err_t display_render_status_date_region(const display_wifi_status_icon_t *icon, const char *date_line)
 {
     display_canvas_t canvas = {
         .pixels = s_line_buffer,
