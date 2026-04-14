@@ -210,7 +210,7 @@ esp_err_t weather_presenter_build_panel_model(const weather_snapshot_t *snapshot
     output->show_condition_text = weather_presenter_should_show_condition_text(snapshot);
 
     if (snapshot->state == WEATHER_DATA_STATE_LOADING) {
-        output->icon = DISPLAY_WEATHER_ICON_KIND_UNKNOWN;
+        output->icon = DISPLAY_WEATHER_ICON_KIND_LOADING;
         weather_presenter_copy_text(output->temperature_text,
                                     sizeof(output->temperature_text),
                                     "--");

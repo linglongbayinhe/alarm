@@ -44,6 +44,7 @@ typedef enum {
     DISPLAY_WEATHER_ICON_KIND_SNOW = 11,
     DISPLAY_WEATHER_ICON_KIND_FOG = 12,
     DISPLAY_WEATHER_ICON_KIND_WINDY = 13,
+    DISPLAY_WEATHER_ICON_KIND_LOADING = 14,
 } display_weather_icon_kind_t;
 
 typedef struct {
