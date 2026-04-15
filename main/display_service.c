@@ -51,6 +51,11 @@ static const char *DISPLAY_SPIFFS_PARTITION_LABEL = NULL;
 #define DISPLAY_WEATHER_GALLERY_COLUMN_COUNT 4
 #define DISPLAY_WEATHER_GALLERY_COLUMN_WIDTH (DISPLAY_WIDTH / DISPLAY_WEATHER_GALLERY_COLUMN_COUNT)
 #define DISPLAY_WEATHER_GALLERY_ICON_Y 4
+#define DISPLAY_WEATHER_GALLERY_ROW_ONE_Y 0
+#define DISPLAY_WEATHER_GALLERY_ROW_TWO_Y 48
+#define DISPLAY_WEATHER_GALLERY_ROW_THREE_Y 96
+#define DISPLAY_WEATHER_GALLERY_ROW_FOUR_Y 144
+#define DISPLAY_WEATHER_GALLERY_BOTTOM_Y 192
 #define DISPLAY_DATE_CENTER_LEFT_OFFSET 36
 
 typedef struct {
@@ -97,10 +102,24 @@ static const weather_icon_kind_t DISPLAY_WEATHER_GALLERY_ROW_ONE[] = {
 };
 
 static const weather_icon_kind_t DISPLAY_WEATHER_GALLERY_ROW_TWO[] = {
+    WEATHER_ICON_OVERCAST,
     WEATHER_ICON_LIGHT_RAIN,
     WEATHER_ICON_MODERATE_RAIN,
     WEATHER_ICON_HEAVY_RAIN,
+};
+
+static const weather_icon_kind_t DISPLAY_WEATHER_GALLERY_ROW_THREE[] = {
+    WEATHER_ICON_SHOWER,
     WEATHER_ICON_THUNDERSTORM,
+    WEATHER_ICON_SNOW,
+    WEATHER_ICON_FOG,
+};
+
+static const weather_icon_kind_t DISPLAY_WEATHER_GALLERY_ROW_FOUR[] = {
+    WEATHER_ICON_HAZE,
+    WEATHER_ICON_DUST_STORM,
+    WEATHER_ICON_WINDY,
+    WEATHER_ICON_UNKNOWN,
 };
 
 static bool s_initialized;
@@ -382,7 +401,7 @@ static esp_err_t display_render_status_date_region(const display_wifi_status_ico
 }
 
 /* Draws one row of the weather icon gallery for visual validation. */
-static esp_err_t display_render_weather_gallery_region(int line_index,
+static esp_err_t display_render_weather_gallery_region(int y_start,
                                                        const weather_icon_kind_t *icons,
                                                        size_t icon_count)
 {
@@ -408,10 +427,63 @@ static esp_err_t display_render_weather_gallery_region(int line_index,
                                            DISPLAY_WEATHER_GALLERY_ICON_Y);
     }
 
-    return display_push_line_buffer(line_index);
+    return display_draw_bitmap_sync(0,
+                                    y_start,
+                                    DISPLAY_WIDTH,
+                                    y_start + DISPLAY_LINE_HEIGHT);
 }
 
-#if !DISPLAY_WEATHER_ICON_GALLERY_ENABLED
+/* Clears the unused bottom strip on the dedicated weather icon test page. */
+static esp_err_t display_clear_weather_gallery_bottom_region(void)
+{
+    display_buffer_fill(DISPLAY_COLOR_BLACK);
+
+    return display_draw_bitmap_sync(0,
+                                    DISPLAY_WEATHER_GALLERY_BOTTOM_Y,
+                                    DISPLAY_WIDTH,
+                                    DISPLAY_HEIGHT);
+}
+
+/* Renders the full-screen weather icon test page without date, time, or status icons. */
+static esp_err_t display_render_weather_gallery_page(void)
+{
+    esp_err_t ret = ESP_OK;
+
+    ret = display_render_weather_gallery_region(DISPLAY_WEATHER_GALLERY_ROW_ONE_Y,
+                                                DISPLAY_WEATHER_GALLERY_ROW_ONE,
+                                                sizeof(DISPLAY_WEATHER_GALLERY_ROW_ONE) /
+                                                sizeof(DISPLAY_WEATHER_GALLERY_ROW_ONE[0]));
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = display_render_weather_gallery_region(DISPLAY_WEATHER_GALLERY_ROW_TWO_Y,
+                                                DISPLAY_WEATHER_GALLERY_ROW_TWO,
+                                                sizeof(DISPLAY_WEATHER_GALLERY_ROW_TWO) /
+                                                sizeof(DISPLAY_WEATHER_GALLERY_ROW_TWO[0]));
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = display_render_weather_gallery_region(DISPLAY_WEATHER_GALLERY_ROW_THREE_Y,
+                                                DISPLAY_WEATHER_GALLERY_ROW_THREE,
+                                                sizeof(DISPLAY_WEATHER_GALLERY_ROW_THREE) /
+                                                sizeof(DISPLAY_WEATHER_GALLERY_ROW_THREE[0]));
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = display_render_weather_gallery_region(DISPLAY_WEATHER_GALLERY_ROW_FOUR_Y,
+                                                DISPLAY_WEATHER_GALLERY_ROW_FOUR,
+                                                sizeof(DISPLAY_WEATHER_GALLERY_ROW_FOUR) /
+                                                sizeof(DISPLAY_WEATHER_GALLERY_ROW_FOUR[0]));
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    return display_clear_weather_gallery_bottom_region();
+}
+
 /* Clears the dedicated weather region and draws one centered weather icon when requested. */
 static esp_err_t display_render_weather_region(const display_weather_panel_t *panel)
 {
@@ -432,7 +504,6 @@ static esp_err_t display_render_weather_region(const display_weather_panel_t *pa
 
     return display_push_line_buffer(DISPLAY_WEATHER_ROW_ONE_REGION_INDEX);
 }
-#endif
 
 
 
@@ -644,6 +715,52 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
         return ESP_ERR_INVALID_ARG;
     }
 
+#if DISPLAY_WEATHER_ICON_GALLERY_ENABLED
+    time_unchanged = (!view_model->time_valid && !s_last_time_valid) ||
+                     (view_model->time_valid &&
+                      s_last_time_valid &&
+                      display_time_equals(&view_model->current_time, &s_last_time));
+    time_changed = !s_has_cached_view ||
+                   (view_model->time_valid != s_last_time_valid) ||
+                   !time_unchanged;
+    weather_changed = !s_has_cached_view || time_changed;
+
+    if (!weather_changed) {
+        return ESP_OK;
+    }
+
+    if (s_use_log_backend) {
+        if (!s_backend_warning_logged) {
+            ESP_LOGW(TAG, "Using log renderer because TFT backend is unavailable");
+            s_backend_warning_logged = true;
+        }
+        ESP_LOGI(TAG, "Screen weather gallery row 1");
+        ESP_LOGI(TAG, "Screen weather gallery row 2");
+        ESP_LOGI(TAG, "Screen weather gallery row 3");
+        ESP_LOGI(TAG, "Screen weather gallery row 4");
+        ESP_LOGI(TAG, "Screen weather gallery bottom clear");
+    } else {
+        ret = display_render_weather_gallery_page();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "LCD update failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+    }
+
+    s_has_cached_view = true;
+    s_last_top_right_icon = view_model->top_right_icon;
+    s_last_weather_visible = view_model->weather_panel.visible;
+    s_last_weather_icon = view_model->weather_panel.icon;
+    s_last_time_valid = view_model->time_valid;
+    if (view_model->time_valid) {
+        s_last_time = view_model->current_time;
+    } else {
+        memset(&s_last_time, 0, sizeof(s_last_time));
+    }
+
+    return ESP_OK;
+#endif
+
     display_format_status_line(&view_model->top_right_icon, status_line, sizeof(status_line));
     display_format_time_lines(view_model,
                               date_line,
@@ -670,13 +787,9 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
     time_changed = !s_has_cached_view ||
                    (view_model->time_valid != s_last_time_valid) ||
                    !time_unchanged;
-#if DISPLAY_WEATHER_ICON_GALLERY_ENABLED
-    weather_changed = !s_has_cached_view || time_changed;;
-#else
     weather_changed = !s_has_cached_view ||
                       (view_model->weather_panel.visible != s_last_weather_visible) ||
                       (view_model->weather_panel.icon != s_last_weather_icon);
-#endif
 
     if (!status_date_changed && !time_changed && !weather_changed) {
         return ESP_OK;
@@ -694,12 +807,7 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
             ESP_LOGI(TAG, "Screen line2: %s", time_line);
         }
         if (weather_changed) {
-#if DISPLAY_WEATHER_ICON_GALLERY_ENABLED
-            ESP_LOGI(TAG, "Screen line3: weather gallery row 1");
-            ESP_LOGI(TAG, "Screen line4: weather gallery row 2");
-#else
             ESP_LOGI(TAG, "Screen line4: %s", weather_line);
-#endif
         }
     } else {
         if (status_date_changed) {
@@ -708,24 +816,9 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
         if ((ret == ESP_OK) && time_changed) {
             ret = display_render_line_region(DISPLAY_TIME_REGION_INDEX, time_line, DISPLAY_TIME_SCALE);
         }
-#if DISPLAY_WEATHER_ICON_GALLERY_ENABLED
-        if ((ret == ESP_OK) && weather_changed) {
-            ret = display_render_weather_gallery_region(DISPLAY_WEATHER_ROW_ONE_REGION_INDEX,
-                                                        DISPLAY_WEATHER_GALLERY_ROW_ONE,
-                                                        sizeof(DISPLAY_WEATHER_GALLERY_ROW_ONE) /
-                                                        sizeof(DISPLAY_WEATHER_GALLERY_ROW_ONE[0]));
-        }
-        if ((ret == ESP_OK) && weather_changed) {
-            ret = display_render_weather_gallery_region(DISPLAY_WEATHER_ROW_TWO_REGION_INDEX,
-                                                        DISPLAY_WEATHER_GALLERY_ROW_TWO,
-                                                        sizeof(DISPLAY_WEATHER_GALLERY_ROW_TWO) /
-                                                        sizeof(DISPLAY_WEATHER_GALLERY_ROW_TWO[0]));
-        }
-#else
         if ((ret == ESP_OK) && weather_changed) {
             ret = display_render_weather_region(&view_model->weather_panel);
         }
-#endif
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "LCD update failed: %s", esp_err_to_name(ret));
             return ret;

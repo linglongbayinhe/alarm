@@ -9,9 +9,11 @@
 #define DISPLAY_COLOR_SUN_YELLOW 0xFDC2
 #define DISPLAY_COLOR_WHITE 0xFFFF
 #define DISPLAY_COLOR_MOON DISPLAY_COLOR_SUN_YELLOW
-#define DISPLAY_COLOR_CLOUD_LIGHT 0xC618
-#define DISPLAY_COLOR_CLOUD_DARK 0x8410
+#define DISPLAY_COLOR_CLOUD_WHITE DISPLAY_COLOR_WHITE
+#define DISPLAY_COLOR_FOG_GRAY 0xC618
+#define DISPLAY_COLOR_DARK_GRAY 0x8410
 #define DISPLAY_COLOR_RAIN_BLUE 0x04FF
+#define DISPLAY_COLOR_DUST_LINE 0xD6B1
 #define DISPLAY_COLOR_ERROR_RED 0xF800
 
 #define WEATHER_ICON_BASE_SIZE 100
@@ -70,14 +72,40 @@ static const display_weather_point_t WEATHER_MOON_TRIM_POINTS[] = {
 };
 
 static const display_weather_ray_t WEATHER_CLOUDY_SUN_RAYS[] = {
-    {34, 24, 34, 13},
-    {49, 31, 58, 22},
-    {54, 45, 66, 45},
-    {49, 59, 58, 68},
-    {34, 66, 34, 78},
-    {20, 59, 11, 68},
-    {15, 45, 3, 45},
-    {20, 31, 11, 22},
+    {68, 11, 68, 3},
+    {86, 20, 92, 12},
+    {92, 39, 99, 39},
+    {50, 20, 43, 13},
+};
+
+static const display_weather_ray_t WEATHER_LIGHT_RAIN_LINES[] = {
+    {51, 83, 45, 99},
+};
+
+static const display_weather_ray_t WEATHER_MODERATE_RAIN_LINES[] = {
+    {42, 83, 36, 99},
+    {61, 83, 55, 99},
+};
+
+static const display_weather_ray_t WEATHER_HEAVY_RAIN_LINES[] = {
+    {35, 83, 29, 99},
+    {52, 83, 46, 99},
+    {69, 83, 63, 99},
+};
+
+static const display_weather_ray_t WEATHER_THUNDER_RAIN_LINES[] = {
+    {31, 77, 25, 91},
+    {75, 77, 69, 91},
+};
+
+static const display_weather_point_t WEATHER_THUNDER_BOLT_POINTS[] = {
+    {48, 64},
+    {66, 64},
+    {57, 79},
+    {68, 79},
+    {46, 99},
+    {51, 84},
+    {40, 84},
 };
 
 static int display_weather_icon_scale(int value)
@@ -258,6 +286,96 @@ static void display_weather_icon_draw_logical_capsule(display_canvas_t *canvas,
     }
 }
 
+static void display_weather_icon_draw_logical_ring(display_canvas_t *canvas,
+                                                   int x_offset,
+                                                   int y_offset,
+                                                   int center_x,
+                                                   int center_y,
+                                                   int outer_radius,
+                                                   int inner_radius,
+                                                   uint16_t color)
+{
+    int local_x = 0;
+    int local_y = 0;
+    display_weather_circle_q_t outer_circle = display_weather_icon_make_circle_q(center_x, center_y, outer_radius);
+    display_weather_circle_q_t inner_circle = display_weather_icon_make_circle_q(center_x, center_y, inner_radius);
+
+    for (local_y = 0; local_y < DISPLAY_WEATHER_ICON_RENDER_SIZE; ++local_y) {
+        int pixel_y_q = display_weather_icon_pixel_center_to_logical_q(local_y);
+
+        for (local_x = 0; local_x < DISPLAY_WEATHER_ICON_RENDER_SIZE; ++local_x) {
+            int pixel_x_q = display_weather_icon_pixel_center_to_logical_q(local_x);
+            bool inside_outer = display_weather_icon_is_inside_circle_q(pixel_x_q, pixel_y_q, &outer_circle);
+            bool inside_inner = display_weather_icon_is_inside_circle_q(pixel_x_q, pixel_y_q, &inner_circle);
+
+            if (inside_outer && !inside_inner) {
+                display_weather_icon_set_pixel(canvas, x_offset + local_x, y_offset + local_y, color);
+            }
+        }
+    }
+}
+
+static bool display_weather_icon_is_inside_polygon_q(int pixel_x_q,
+                                                     int pixel_y_q,
+                                                     const display_weather_point_t *points,
+                                                     size_t point_count)
+{
+    bool inside = false;
+    size_t current = 0;
+    size_t previous = 0;
+
+    if ((points == NULL) || (point_count < 3)) {
+        return false;
+    }
+
+    previous = point_count - 1;
+    for (current = 0; current < point_count; ++current) {
+        int current_x_q = display_weather_icon_logical_to_q(points[current].x);
+        int current_y_q = display_weather_icon_logical_to_q(points[current].y);
+        int previous_x_q = display_weather_icon_logical_to_q(points[previous].x);
+        int previous_y_q = display_weather_icon_logical_to_q(points[previous].y);
+        bool crosses_y = (current_y_q > pixel_y_q) != (previous_y_q > pixel_y_q);
+
+        if (crosses_y) {
+            int64_t intersect_x_q = current_x_q +
+                                    (((int64_t)(pixel_y_q - current_y_q) *
+                                      (previous_x_q - current_x_q)) /
+                                     (previous_y_q - current_y_q));
+
+            if (pixel_x_q <= intersect_x_q) {
+                inside = !inside;
+            }
+        }
+
+        previous = current;
+    }
+
+    return inside;
+}
+
+static void display_weather_icon_draw_logical_polygon(display_canvas_t *canvas,
+                                                      int x_offset,
+                                                      int y_offset,
+                                                      const display_weather_point_t *points,
+                                                      size_t point_count,
+                                                      uint16_t color)
+{
+    int local_x = 0;
+    int local_y = 0;
+
+    for (local_y = 0; local_y < DISPLAY_WEATHER_ICON_RENDER_SIZE; ++local_y) {
+        int pixel_y_q = display_weather_icon_pixel_center_to_logical_q(local_y);
+
+        for (local_x = 0; local_x < DISPLAY_WEATHER_ICON_RENDER_SIZE; ++local_x) {
+            int pixel_x_q = display_weather_icon_pixel_center_to_logical_q(local_x);
+
+            if (display_weather_icon_is_inside_polygon_q(pixel_x_q, pixel_y_q, points, point_count)) {
+                display_weather_icon_set_pixel(canvas, x_offset + local_x, y_offset + local_y, color);
+            }
+        }
+    }
+}
+
 static void display_weather_icon_draw_scaled_rect(display_canvas_t *canvas,
                                                   int x_offset,
                                                   int y_offset,
@@ -286,6 +404,25 @@ static void display_weather_icon_draw_scaled_circle(display_canvas_t *canvas,
     display_weather_icon_draw_logical_circle(canvas, x_offset, y_offset, center_x, center_y, radius, color);
 }
 
+static void display_weather_icon_draw_scaled_ring(display_canvas_t *canvas,
+                                                  int x_offset,
+                                                  int y_offset,
+                                                  int center_x,
+                                                  int center_y,
+                                                  int outer_radius,
+                                                  int inner_radius,
+                                                  uint16_t color)
+{
+    display_weather_icon_draw_logical_ring(canvas,
+                                           x_offset,
+                                           y_offset,
+                                           center_x,
+                                           center_y,
+                                           outer_radius,
+                                           inner_radius,
+                                           color);
+}
+
 static void display_weather_icon_draw_scaled_round_line(display_canvas_t *canvas,
                                                         int x_offset,
                                                         int y_offset,
@@ -307,16 +444,136 @@ static void display_weather_icon_draw_scaled_round_line(display_canvas_t *canvas
                                               color);
 }
 
+static void display_weather_icon_draw_scaled_polygon(display_canvas_t *canvas,
+                                                     int x_offset,
+                                                     int y_offset,
+                                                     const display_weather_point_t *points,
+                                                     size_t point_count,
+                                                     uint16_t color)
+{
+    display_weather_icon_draw_logical_polygon(canvas, x_offset, y_offset, points, point_count, color);
+}
+
 static void display_weather_icon_draw_cloud_shape(display_canvas_t *canvas,
                                                   int x_offset,
                                                   int y_offset,
+                                                  int logical_x_offset,
+                                                  int logical_y_offset,
                                                   uint16_t color)
 {
-    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 34, 60, 18, color);
-    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 52, 48, 24, color);
-    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 72, 60, 18, color);
-    display_weather_icon_draw_scaled_rect(canvas, x_offset, y_offset, 24, 58, 58, 21, color);
-    display_weather_icon_draw_scaled_rect(canvas, x_offset, y_offset, 36, 51, 35, 28, color);
+    display_weather_icon_draw_scaled_circle(canvas,
+                                            x_offset,
+                                            y_offset,
+                                            41 + logical_x_offset,
+                                            60 + logical_y_offset,
+                                            22,
+                                            color);
+    display_weather_icon_draw_scaled_circle(canvas,
+                                            x_offset,
+                                            y_offset,
+                                            66 + logical_x_offset,
+                                            65 + logical_y_offset,
+                                            17,
+                                            color);
+    display_weather_icon_draw_scaled_round_line(canvas,
+                                                x_offset,
+                                                y_offset,
+                                                25 + logical_x_offset,
+                                                72 + logical_y_offset,
+                                                78 + logical_x_offset,
+                                                72 + logical_y_offset,
+                                                20,
+                                                color);
+    display_weather_icon_draw_scaled_round_line(canvas,
+                                                x_offset,
+                                                y_offset,
+                                                36 + logical_x_offset,
+                                                62 + logical_y_offset,
+                                                66 + logical_x_offset,
+                                                62 + logical_y_offset,
+                                                21,
+                                                color);
+}
+
+static void display_weather_icon_draw_crescent_shape(display_canvas_t *canvas,
+                                                     int x_offset,
+                                                     int y_offset,
+                                                     int center_x,
+                                                     int center_y,
+                                                     int radius,
+                                                     int cutout_center_x,
+                                                     int cutout_center_y,
+                                                     int cutout_radius,
+                                                     uint16_t color)
+{
+    int local_x = 0;
+    int local_y = 0;
+    display_weather_circle_q_t moon_circle = display_weather_icon_make_circle_q(center_x, center_y, radius);
+    display_weather_circle_q_t cutout_circle =
+        display_weather_icon_make_circle_q(cutout_center_x, cutout_center_y, cutout_radius);
+
+    for (local_y = 0; local_y < DISPLAY_WEATHER_ICON_RENDER_SIZE; ++local_y) {
+        int pixel_y_q = display_weather_icon_pixel_center_to_logical_q(local_y);
+
+        for (local_x = 0; local_x < DISPLAY_WEATHER_ICON_RENDER_SIZE; ++local_x) {
+            int pixel_x_q = display_weather_icon_pixel_center_to_logical_q(local_x);
+            bool is_moon_pixel = display_weather_icon_is_inside_circle_q(pixel_x_q, pixel_y_q, &moon_circle);
+            bool is_cutout_pixel = display_weather_icon_is_inside_circle_q(pixel_x_q, pixel_y_q, &cutout_circle);
+
+            if (is_moon_pixel && !is_cutout_pixel) {
+                display_weather_icon_set_pixel(canvas, x_offset + local_x, y_offset + local_y, color);
+            }
+        }
+    }
+}
+
+static void display_weather_icon_draw_rain_lines(display_canvas_t *canvas,
+                                                 int x_offset,
+                                                 int y_offset,
+                                                 const display_weather_ray_t *rain_lines,
+                                                 size_t rain_line_count)
+{
+    size_t index = 0;
+
+    for (index = 0; index < rain_line_count; ++index) {
+        display_weather_icon_draw_scaled_round_line(canvas,
+                                                    x_offset,
+                                                    y_offset,
+                                                    rain_lines[index].start_x,
+                                                    rain_lines[index].start_y,
+                                                    rain_lines[index].end_x,
+                                                    rain_lines[index].end_y,
+                                                    7,
+                                                    DISPLAY_COLOR_RAIN_BLUE);
+    }
+}
+
+static void display_weather_icon_draw_raindrop(display_canvas_t *canvas,
+                                               int x_offset,
+                                               int y_offset,
+                                               int center_x,
+                                               int center_y)
+{
+    const display_weather_point_t drop_points[] = {
+        {center_x, center_y - 9},
+        {center_x - 6, center_y + 1},
+        {center_x, center_y + 9},
+        {center_x + 6, center_y + 1},
+    };
+
+    display_weather_icon_draw_scaled_polygon(canvas,
+                                             x_offset,
+                                             y_offset,
+                                             drop_points,
+                                             sizeof(drop_points) / sizeof(drop_points[0]),
+                                             DISPLAY_COLOR_RAIN_BLUE);
+    display_weather_icon_draw_scaled_circle(canvas,
+                                            x_offset,
+                                            y_offset,
+                                            center_x,
+                                            center_y + 2,
+                                            5,
+                                            DISPLAY_COLOR_RAIN_BLUE);
 }
 
 static void display_weather_icon_draw_clear_day(display_canvas_t *canvas, int x_offset, int y_offset)
@@ -392,7 +649,7 @@ static void display_weather_icon_draw_clear_night(display_canvas_t *canvas, int 
     }
 }
 
-static void display_weather_icon_draw_cloudy(display_canvas_t *canvas, int x_offset, int y_offset)
+static void display_weather_icon_draw_cloudy_day(display_canvas_t *canvas, int x_offset, int y_offset)
 {
     size_t index = 0;
 
@@ -410,54 +667,212 @@ static void display_weather_icon_draw_cloudy(display_canvas_t *canvas, int x_off
                                                     DISPLAY_COLOR_SUN_YELLOW);
     }
 
-    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 34, 45, 16, DISPLAY_COLOR_SUN_YELLOW);
-    display_weather_icon_draw_cloud_shape(canvas, x_offset, y_offset, DISPLAY_COLOR_CLOUD_LIGHT);
+    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 68, 39, 21, DISPLAY_COLOR_SUN_YELLOW);
+    display_weather_icon_draw_cloud_shape(canvas,
+                                          x_offset,
+                                          y_offset,
+                                          0,
+                                          2,
+                                          DISPLAY_COLOR_CLOUD_WHITE);
+}
+
+static void display_weather_icon_draw_cloudy_night(display_canvas_t *canvas, int x_offset, int y_offset)
+{
+    display_weather_icon_draw_crescent_shape(canvas,
+                                             x_offset,
+                                             y_offset,
+                                             68,
+                                             39,
+                                             27,
+                                             83,
+                                             29,
+                                             26,
+                                             DISPLAY_COLOR_MOON);
+    display_weather_icon_draw_cloud_shape(canvas,
+                                          x_offset,
+                                          y_offset,
+                                          0,
+                                          2,
+                                          DISPLAY_COLOR_CLOUD_WHITE);
 }
 
 static void display_weather_icon_draw_overcast(display_canvas_t *canvas, int x_offset, int y_offset)
 {
-    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 45, 56, 18, DISPLAY_COLOR_CLOUD_DARK);
-    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 62, 51, 20, DISPLAY_COLOR_CLOUD_DARK);
-    display_weather_icon_draw_scaled_rect(canvas, x_offset, y_offset, 34, 59, 52, 18, DISPLAY_COLOR_CLOUD_DARK);
-    display_weather_icon_draw_cloud_shape(canvas, x_offset, y_offset, DISPLAY_COLOR_CLOUD_LIGHT);
+    display_weather_icon_draw_cloud_shape(canvas,
+                                          x_offset,
+                                          y_offset,
+                                          0,
+                                          2,
+                                          DISPLAY_COLOR_CLOUD_WHITE);
 }
 
-static void display_weather_icon_draw_rain(display_canvas_t *canvas, int x_offset, int y_offset)
+static void display_weather_icon_draw_light_rain(display_canvas_t *canvas, int x_offset, int y_offset)
 {
-    display_weather_icon_draw_cloud_shape(canvas, x_offset, y_offset, DISPLAY_COLOR_CLOUD_LIGHT);
-    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 36, 76, 30, 94, 5, DISPLAY_COLOR_RAIN_BLUE);
-    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 53, 76, 47, 96, 5, DISPLAY_COLOR_RAIN_BLUE);
-    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 70, 76, 64, 94, 5, DISPLAY_COLOR_RAIN_BLUE);
+    display_weather_icon_draw_rain_lines(canvas,
+                                         x_offset,
+                                         y_offset,
+                                         WEATHER_LIGHT_RAIN_LINES,
+                                         sizeof(WEATHER_LIGHT_RAIN_LINES) /
+                                         sizeof(WEATHER_LIGHT_RAIN_LINES[0]));
+    display_weather_icon_draw_cloud_shape(canvas,
+                                          x_offset,
+                                          y_offset,
+                                          0,
+                                          -5,
+                                          DISPLAY_COLOR_CLOUD_WHITE);
+}
+
+static void display_weather_icon_draw_moderate_rain(display_canvas_t *canvas, int x_offset, int y_offset)
+{
+    display_weather_icon_draw_rain_lines(canvas,
+                                         x_offset,
+                                         y_offset,
+                                         WEATHER_MODERATE_RAIN_LINES,
+                                         sizeof(WEATHER_MODERATE_RAIN_LINES) /
+                                         sizeof(WEATHER_MODERATE_RAIN_LINES[0]));
+    display_weather_icon_draw_cloud_shape(canvas,
+                                          x_offset,
+                                          y_offset,
+                                          0,
+                                          -5,
+                                          DISPLAY_COLOR_CLOUD_WHITE);
+}
+
+static void display_weather_icon_draw_heavy_rain(display_canvas_t *canvas, int x_offset, int y_offset)
+{
+    display_weather_icon_draw_rain_lines(canvas,
+                                         x_offset,
+                                         y_offset,
+                                         WEATHER_HEAVY_RAIN_LINES,
+                                         sizeof(WEATHER_HEAVY_RAIN_LINES) /
+                                         sizeof(WEATHER_HEAVY_RAIN_LINES[0]));
+    display_weather_icon_draw_cloud_shape(canvas,
+                                          x_offset,
+                                          y_offset,
+                                          0,
+                                          -5,
+                                          DISPLAY_COLOR_CLOUD_WHITE);
+}
+
+static void display_weather_icon_draw_shower(display_canvas_t *canvas, int x_offset, int y_offset)
+{
+    display_weather_icon_draw_cloud_shape(canvas,
+                                          x_offset,
+                                          y_offset,
+                                          0,
+                                          -7,
+                                          DISPLAY_COLOR_CLOUD_WHITE);
+    display_weather_icon_draw_raindrop(canvas, x_offset, y_offset, 35, 87);
+    display_weather_icon_draw_raindrop(canvas, x_offset, y_offset, 52, 90);
+    display_weather_icon_draw_raindrop(canvas, x_offset, y_offset, 69, 87);
 }
 
 static void display_weather_icon_draw_thunderstorm(display_canvas_t *canvas, int x_offset, int y_offset)
 {
-    display_weather_icon_draw_cloud_shape(canvas, x_offset, y_offset, DISPLAY_COLOR_CLOUD_LIGHT);
-    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 54, 69, 44, 88, 8, DISPLAY_COLOR_SUN_YELLOW);
-    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 44, 88, 57, 84, 8, DISPLAY_COLOR_SUN_YELLOW);
-    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 57, 84, 47, 98, 8, DISPLAY_COLOR_SUN_YELLOW);
+    display_weather_icon_draw_cloud_shape(canvas,
+                                          x_offset,
+                                          y_offset,
+                                          0,
+                                          -6,
+                                          DISPLAY_COLOR_CLOUD_WHITE);
+    display_weather_icon_draw_scaled_polygon(canvas,
+                                             x_offset,
+                                             y_offset,
+                                             WEATHER_THUNDER_BOLT_POINTS,
+                                             sizeof(WEATHER_THUNDER_BOLT_POINTS) /
+                                             sizeof(WEATHER_THUNDER_BOLT_POINTS[0]),
+                                             DISPLAY_COLOR_SUN_YELLOW);
+    display_weather_icon_draw_rain_lines(canvas,
+                                         x_offset,
+                                         y_offset,
+                                         WEATHER_THUNDER_RAIN_LINES,
+                                         sizeof(WEATHER_THUNDER_RAIN_LINES) /
+                                         sizeof(WEATHER_THUNDER_RAIN_LINES[0]));
 }
 
 static void display_weather_icon_draw_snow(display_canvas_t *canvas, int x_offset, int y_offset)
 {
-    display_weather_icon_draw_cloud_shape(canvas, x_offset, y_offset, DISPLAY_COLOR_CLOUD_LIGHT);
-    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 34, 82, 5, DISPLAY_COLOR_WHITE);
-    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 52, 92, 5, DISPLAY_COLOR_WHITE);
-    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 70, 82, 5, DISPLAY_COLOR_WHITE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 50, 15, 50, 85, 7, DISPLAY_COLOR_WHITE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 16, 50, 84, 50, 7, DISPLAY_COLOR_WHITE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 25, 25, 75, 75, 7, DISPLAY_COLOR_WHITE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 75, 25, 25, 75, 7, DISPLAY_COLOR_WHITE);
+
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 50, 31, 38, 22, 5, DISPLAY_COLOR_WHITE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 50, 31, 62, 22, 5, DISPLAY_COLOR_WHITE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 69, 50, 82, 39, 5, DISPLAY_COLOR_WHITE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 69, 50, 82, 61, 5, DISPLAY_COLOR_WHITE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 50, 69, 38, 78, 5, DISPLAY_COLOR_WHITE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 50, 69, 62, 78, 5, DISPLAY_COLOR_WHITE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 31, 50, 18, 39, 5, DISPLAY_COLOR_WHITE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 31, 50, 18, 61, 5, DISPLAY_COLOR_WHITE);
 }
 
 static void display_weather_icon_draw_fog(display_canvas_t *canvas, int x_offset, int y_offset)
 {
-    display_weather_icon_draw_cloud_shape(canvas, x_offset, y_offset, DISPLAY_COLOR_CLOUD_LIGHT);
-    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 22, 75, 78, 75, 5, DISPLAY_COLOR_CLOUD_DARK);
-    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 16, 86, 84, 86, 5, DISPLAY_COLOR_CLOUD_LIGHT);
-    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 28, 96, 72, 96, 5, DISPLAY_COLOR_CLOUD_DARK);
+    display_weather_icon_draw_cloud_shape(canvas,
+                                          x_offset,
+                                          y_offset,
+                                          0,
+                                          -7,
+                                          DISPLAY_COLOR_CLOUD_WHITE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 29, 84, 56, 84, 6, DISPLAY_COLOR_WHITE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 72, 84, 78, 84, 6, DISPLAY_COLOR_WHITE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 29, 96, 35, 96, 6, DISPLAY_COLOR_WHITE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 51, 96, 78, 96, 6, DISPLAY_COLOR_WHITE);
+}
+
+static void display_weather_icon_draw_haze(display_canvas_t *canvas, int x_offset, int y_offset)
+{
+    display_weather_icon_draw_scaled_ring(canvas, x_offset, y_offset, 35, 52, 19, 13, DISPLAY_COLOR_FOG_GRAY);
+    display_weather_icon_draw_scaled_ring(canvas, x_offset, y_offset, 65, 52, 19, 13, DISPLAY_COLOR_FOG_GRAY);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 48, 52, 52, 52, 6, DISPLAY_COLOR_FOG_GRAY);
+
+    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 20, 24, 4, DISPLAY_COLOR_SUN_YELLOW);
+    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 40, 24, 4, DISPLAY_COLOR_SUN_YELLOW);
+    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 60, 24, 4, DISPLAY_COLOR_SUN_YELLOW);
+    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 80, 24, 4, DISPLAY_COLOR_SUN_YELLOW);
+    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 20, 78, 4, DISPLAY_COLOR_SUN_YELLOW);
+    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 40, 78, 4, DISPLAY_COLOR_SUN_YELLOW);
+    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 60, 78, 4, DISPLAY_COLOR_SUN_YELLOW);
+    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 80, 78, 4, DISPLAY_COLOR_SUN_YELLOW);
+}
+
+static void display_weather_icon_draw_dust_storm(display_canvas_t *canvas, int x_offset, int y_offset)
+{
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 63, 24, 78, 24, 7, DISPLAY_COLOR_DUST_LINE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 78, 24, 85, 32, 7, DISPLAY_COLOR_DUST_LINE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 85, 32, 74, 41, 7, DISPLAY_COLOR_DUST_LINE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 24, 45, 70, 45, 6, DISPLAY_COLOR_DUST_LINE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 36, 60, 76, 60, 6, DISPLAY_COLOR_DUST_LINE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 43, 75, 63, 75, 6, DISPLAY_COLOR_DUST_LINE);
+
+    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 15, 45, 3, DISPLAY_COLOR_SUN_YELLOW);
+    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 80, 60, 3, DISPLAY_COLOR_SUN_YELLOW);
+    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 31, 62, 3, DISPLAY_COLOR_SUN_YELLOW);
+    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 66, 79, 3, DISPLAY_COLOR_SUN_YELLOW);
+}
+
+static void display_weather_icon_draw_windy(display_canvas_t *canvas, int x_offset, int y_offset)
+{
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 23, 30, 57, 30, 7, DISPLAY_COLOR_RAIN_BLUE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 57, 30, 66, 20, 7, DISPLAY_COLOR_RAIN_BLUE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 66, 20, 80, 25, 7, DISPLAY_COLOR_RAIN_BLUE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 8, 54, 78, 54, 7, DISPLAY_COLOR_RAIN_BLUE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 78, 54, 91, 68, 7, DISPLAY_COLOR_RAIN_BLUE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 91, 68, 77, 80, 7, DISPLAY_COLOR_RAIN_BLUE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 14, 70, 48, 70, 7, DISPLAY_COLOR_RAIN_BLUE);
 }
 
 static void display_weather_icon_draw_unknown(display_canvas_t *canvas, int x_offset, int y_offset)
 {
-    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 50, 25, 50, 62, 8, DISPLAY_COLOR_ERROR_RED);
-    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 50, 78, 6, DISPLAY_COLOR_ERROR_RED);
+    display_weather_icon_draw_cloud_shape(canvas,
+                                          x_offset,
+                                          y_offset,
+                                          0,
+                                          0,
+                                          DISPLAY_COLOR_CLOUD_WHITE);
+    display_weather_icon_draw_scaled_round_line(canvas, x_offset, y_offset, 50, 56, 50, 68, 6, DISPLAY_COLOR_ERROR_RED);
+    display_weather_icon_draw_scaled_circle(canvas, x_offset, y_offset, 50, 75, 4, DISPLAY_COLOR_ERROR_RED);
 }
 
 void display_weather_icon_renderer_draw(const display_weather_panel_t *panel,
@@ -484,17 +899,25 @@ void display_weather_icon_renderer_draw(const display_weather_panel_t *panel,
             display_weather_icon_draw_clear_night(canvas, x_offset, y_offset);
             break;
         case WEATHER_ICON_CLOUDY_DAY:
+            display_weather_icon_draw_cloudy_day(canvas, x_offset, y_offset);
+            break;
         case WEATHER_ICON_CLOUDY_NIGHT:
-            display_weather_icon_draw_cloudy(canvas, x_offset, y_offset);
+            display_weather_icon_draw_cloudy_night(canvas, x_offset, y_offset);
             break;
         case WEATHER_ICON_OVERCAST:
             display_weather_icon_draw_overcast(canvas, x_offset, y_offset);
             break;
         case WEATHER_ICON_LIGHT_RAIN:
+            display_weather_icon_draw_light_rain(canvas, x_offset, y_offset);
+            break;
         case WEATHER_ICON_MODERATE_RAIN:
+            display_weather_icon_draw_moderate_rain(canvas, x_offset, y_offset);
+            break;
         case WEATHER_ICON_HEAVY_RAIN:
+            display_weather_icon_draw_heavy_rain(canvas, x_offset, y_offset);
+            break;
         case WEATHER_ICON_SHOWER:
-            display_weather_icon_draw_rain(canvas, x_offset, y_offset);
+            display_weather_icon_draw_shower(canvas, x_offset, y_offset);
             break;
         case WEATHER_ICON_THUNDERSTORM:
             display_weather_icon_draw_thunderstorm(canvas, x_offset, y_offset);
@@ -503,10 +926,16 @@ void display_weather_icon_renderer_draw(const display_weather_panel_t *panel,
             display_weather_icon_draw_snow(canvas, x_offset, y_offset);
             break;
         case WEATHER_ICON_FOG:
-        case WEATHER_ICON_HAZE:
-        case WEATHER_ICON_DUST_STORM:
-        case WEATHER_ICON_WINDY:
             display_weather_icon_draw_fog(canvas, x_offset, y_offset);
+            break;
+        case WEATHER_ICON_HAZE:
+            display_weather_icon_draw_haze(canvas, x_offset, y_offset);
+            break;
+        case WEATHER_ICON_DUST_STORM:
+            display_weather_icon_draw_dust_storm(canvas, x_offset, y_offset);
+            break;
+        case WEATHER_ICON_WINDY:
+            display_weather_icon_draw_windy(canvas, x_offset, y_offset);
             break;
         case WEATHER_ICON_UNKNOWN:
         default:
