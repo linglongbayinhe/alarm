@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "display_lvgl.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "display_config.h"
@@ -24,6 +25,7 @@
 static const char *TAG = "DISPLAY_SERVICE";
 static const char *DATE_PLACEHOLDER = "----.--.--";
 static const char *TIME_PLACEHOLDER = "--:--:--";
+static const char *WEEK_PLACEHOLDER = "";
 static const char *DISPLAY_SPIFFS_PARTITION_LABEL = NULL;
 
 #define DISPLAY_CMD_BITS 8
@@ -41,7 +43,7 @@ static const char *DISPLAY_SPIFFS_PARTITION_LABEL = NULL;
 #define DISPLAY_COLOR_WHITE 0xFFFF
 #define DISPLAY_COLOR_BLACK 0x0000
 #define DISPLAY_STATUS_TEXT_BUFFER_SIZE 48
-#define DISPLAY_WEATHER_ICON_GALLERY_ENABLED 1
+#define DISPLAY_WEATHER_ICON_GALLERY_ENABLED 0
 #define DISPLAY_TOP_RIGHT_ICON_BOX_SIZE 34
 #define DISPLAY_TOP_RIGHT_ICON_MARGIN_RIGHT 0
 #define DISPLAY_TOP_RIGHT_ICON_MARGIN_TOP 0
@@ -272,14 +274,27 @@ static void display_format_time_lines(const display_view_model_t *view_model,
                                       char *date_line,
                                       size_t date_line_size,
                                       char *time_line,
-                                      size_t time_line_size)
+                                      size_t time_line_size,
+                                      char *week_line,
+                                      size_t week_line_size)
 {
+    static const char *CHINESE_WEEKDAYS[] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
+
     if (view_model->time_valid) {
         strftime(date_line, date_line_size, "%Y.%m.%d", &view_model->current_time);
+        // snprintf(date_line, date_line_size, "%04d.%02d.%02d 周%s",
+        //     view_model->current_time.tm_year + 1900,
+        //     view_model->current_time.tm_mon + 1,
+        //     view_model->current_time.tm_mday,
+        //     WEEKDAYS[view_model->current_time.tm_wday]);
+        const char *weekday = CHINESE_WEEKDAYS[view_model->current_time.tm_wday];
+        // strftime(weekday, sizeof(weekday), "%w", &view_model->current_time);
+        snprintf(week_line, week_line_size, "%s", weekday);
         strftime(time_line, time_line_size, "%H:%M:%S", &view_model->current_time);
     } else {
         display_copy_line(date_line, date_line_size, DATE_PLACEHOLDER);
         display_copy_line(time_line, time_line_size, TIME_PLACEHOLDER);
+        display_copy_line(week_line, week_line_size, WEEK_PLACEHOLDER);
     }
 }
 
@@ -372,25 +387,40 @@ static void display_draw_ascii_text(const char *text, int scale, int x_offset, i
 }
 
 /* Clears the top region, draws the compact date and keeps the Wi-Fi icon at top right. */
-static esp_err_t display_render_status_date_region(const display_wifi_status_icon_t *icon, const char *date_line)
+static esp_err_t display_render_status_date_region(const display_wifi_status_icon_t *icon, const char *date_line, const char *week_line)
 {
     display_canvas_t canvas = {
         .pixels = s_line_buffer,
         .width = DISPLAY_WIDTH,
         .height = DISPLAY_LINE_HEIGHT,
     };
-    int text_width = 0;
+    int date_width = 0;
+    int week_width = 0;
     int x_offset = 0;
     int y_offset = 0;
+    int gap = 15;  /* 日期和周几之间的间隔 */
 
     display_buffer_fill(DISPLAY_COLOR_BLACK);
-    text_width = display_measure_ascii_text(date_line, DISPLAY_DATE_SCALE);
-    x_offset = ((DISPLAY_WIDTH - text_width) / 2) - DISPLAY_DATE_CENTER_LEFT_OFFSET;
+    
+    /* 计算日期和周几的总宽度 */
+    date_width = display_measure_ascii_text(date_line, DISPLAY_DATE_SCALE);
+    week_width = display_measure_ascii_text(week_line, DISPLAY_DATE_SCALE);
+    
+    /* 居中显示 */
+    x_offset = (DISPLAY_WIDTH - date_width - gap - week_width) / 2;
     if (x_offset < 0) {
         x_offset = 0;
     }
+    
     y_offset = (DISPLAY_LINE_HEIGHT - (7 * DISPLAY_DATE_SCALE)) / 2;
+    
+    /* 显示日期 */
     display_draw_ascii_text(date_line, DISPLAY_DATE_SCALE, x_offset, y_offset, DISPLAY_COLOR_WHITE);
+    
+    /* 显示周几（日期后面空15个像素）*/
+    if ((week_line != NULL) && (week_line[0] != '\0')) {
+        display_draw_ascii_text(week_line, DISPLAY_DATE_SCALE, x_offset + date_width + gap, y_offset, DISPLAY_COLOR_WHITE);
+    }
 
     display_status_icon_renderer_draw(icon,
                                       &canvas,
@@ -683,6 +713,12 @@ esp_err_t display_service_init(void)
     if (ret != ESP_OK) {
         s_use_log_backend = true;
         ESP_LOGW(TAG, "Display hardware init failed, fallback to log renderer");
+    } else {
+        esp_err_t lvgl_ret = display_lvgl_init(s_panel_io, s_panel);
+        if (lvgl_ret != ESP_OK) {
+            ESP_LOGW(TAG, "LVGL port init failed: %s (legacy strip renderer still active)",
+                     esp_err_to_name(lvgl_ret));
+        }
     }
 
     s_initialized = true;
@@ -697,6 +733,7 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
 {
     char status_line[DISPLAY_STATUS_TEXT_BUFFER_SIZE];
     char date_line[16];
+    char week_line[8];
     char time_line[16];
     char weather_line[DISPLAY_STATUS_TEXT_BUFFER_SIZE];
     bool status_icon_changed = false;
@@ -713,6 +750,11 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
     }
     if (view_model == NULL) {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    /* esp_lvgl_port owns panel IO flush callbacks; avoid fighting the legacy strip renderer. */
+    if (display_lvgl_is_active()) {
+        return ESP_OK;
     }
 
 #if DISPLAY_WEATHER_ICON_GALLERY_ENABLED
@@ -766,7 +808,9 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
                               date_line,
                               sizeof(date_line),
                               time_line,
-                              sizeof(time_line));
+                              sizeof(time_line),
+                              week_line,
+                              sizeof(week_line));
     display_format_weather_line(&view_model->weather_panel, weather_line, sizeof(weather_line));
 
     time_unchanged = (!view_model->time_valid && !s_last_time_valid) ||
@@ -811,7 +855,7 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
         }
     } else {
         if (status_date_changed) {
-            ret = display_render_status_date_region(&view_model->top_right_icon, date_line);
+            ret = display_render_status_date_region(&view_model->top_right_icon, date_line, week_line);
         }
         if ((ret == ESP_OK) && time_changed) {
             ret = display_render_line_region(DISPLAY_TIME_REGION_INDEX, time_line, DISPLAY_TIME_SCALE);
@@ -885,6 +929,11 @@ esp_err_t display_service_show_image(const char *image_path)
 
     if (s_use_log_backend) {
         ESP_LOGW(TAG, "Cannot display image: TFT backend unavailable, using log fallback");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (display_lvgl_is_active()) {
+        ESP_LOGW(TAG, "show_image unsupported while LVGL port uses panel IO (use LVGL images later)");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -1021,6 +1070,11 @@ esp_err_t display_service_show_image_data(const uint16_t *image_data, int width,
 
     if (s_use_log_backend) {
         ESP_LOGW(TAG, "Cannot display image: TFT backend unavailable, using log fallback");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (display_lvgl_is_active()) {
+        ESP_LOGW(TAG, "show_image_data unsupported while LVGL port uses panel IO");
         return ESP_ERR_INVALID_STATE;
     }
 
