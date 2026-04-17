@@ -51,7 +51,7 @@ esp_err_t display_lvgl_init(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_ha
 
     lv_obj_t *label_cn = lv_label_create(scr);
     lv_obj_set_style_text_font(label_cn, &SourceHanSans_Normal_16, LV_PART_MAIN);
-    lv_label_set_text(label_cn, "周四晴25度");
+    lv_label_set_text(label_cn, "周四晴25℃");
     lv_obj_set_style_text_color(label_cn, lv_color_white(), LV_PART_MAIN);
     lv_obj_align(label_cn, LV_ALIGN_CENTER, 0, -16);
 
