@@ -30,34 +30,57 @@ void create_screen_main() {
     {
         lv_obj_t *parent_obj = obj;
         {
+            // date_label
             lv_obj_t *obj = lv_label_create(parent_obj);
-            lv_obj_set_pos(obj, 53, 60);
+            objects.date_label = obj;
+            lv_obj_set_pos(obj, 40, 71);
             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
             lv_label_set_text_static(obj, "YYYY.MM.DD");
         }
         {
+            // week_label
             lv_obj_t *obj = lv_label_create(parent_obj);
-            lv_obj_set_pos(obj, 160, 59);
+            objects.week_label = obj;
+            lv_obj_set_pos(obj, 156, 71);
             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-            lv_obj_set_style_text_font(obj, &ui_font_source_han_sans_sc_normal, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_text_font(obj, &ui_font_source_han_sans_sc_normal_16, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_label_set_text_static(obj, "周一");
         }
         {
             // time_label
             lv_obj_t *obj = lv_label_create(parent_obj);
             objects.time_label = obj;
-            lv_obj_set_pos(obj, 68, 120);
+            lv_obj_set_pos(obj, 40, 103);
             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-            lv_label_set_text_static(obj, "24:24:24");
+            lv_obj_set_style_text_font(obj, &ui_font_source_hans_sans_sc_normal_60, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_label_set_text_static(obj, "24:24");
         }
         {
-            // sky
-            lv_obj_t *obj = lv_label_create(parent_obj);
-            objects.sky = obj;
-            lv_obj_set_pos(obj, 181, 120);
+            // weather_image
+            lv_obj_t *obj = lv_image_create(parent_obj);
+            objects.weather_image = obj;
+            lv_obj_set_pos(obj, 218, 71);
             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-            lv_obj_set_style_text_font(obj, &ui_font_source_han_sans_sc_normal, LV_PART_MAIN | LV_STATE_DEFAULT);
-            lv_label_set_text_static(obj, "晴25℃\n");
+            lv_obj_set_style_width(obj, 64, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_height(obj, 64, LV_PART_MAIN | LV_STATE_DEFAULT);
+        }
+        {
+            // weather_label
+            lv_obj_t *obj = lv_label_create(parent_obj);
+            objects.weather_label = obj;
+            lv_obj_set_pos(obj, 221, 145);
+            lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+            lv_obj_set_style_text_font(obj, &ui_font_source_han_sans_sc_normal_16, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_label_set_text_static(obj, "晴");
+        }
+        {
+            // temprature_label
+            lv_obj_t *obj = lv_label_create(parent_obj);
+            objects.temprature_label = obj;
+            lv_obj_set_pos(obj, 246, 145);
+            lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+            lv_obj_set_style_text_font(obj, &ui_font_source_han_sans_sc_normal_16, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_label_set_text_static(obj, "25℃");
         }
     }
     
@@ -85,7 +108,8 @@ void tick_screen_by_id(enum ScreensEnum screenId) {
 //
 
 ext_font_desc_t fonts[] = {
-    { "SourceHanSansSC_Normal", &ui_font_source_han_sans_sc_normal },
+    { "SourceHanSansSC_Normal_16", &ui_font_source_han_sans_sc_normal_16 },
+    { "SourceHansSansSC_Normal_60", &ui_font_source_hans_sans_sc_normal_60 },
 #if LV_FONT_MONTSERRAT_8
     { "MONTSERRAT_8", &lv_font_montserrat_8 },
 #endif

@@ -10,7 +10,7 @@
 //
 
 void init_style_time_label_MAIN_DEFAULT(lv_style_t *style) {
-    lv_style_set_text_font(style, &ui_font_source_han_sans_sc_normal);
+    lv_style_set_text_font(style, &ui_font_source_han_sans_sc_normal_16);
 };
 
 lv_style_t *get_style_time_label_MAIN_DEFAULT() {

@@ -1,7 +1,7 @@
 #ifndef EEZ_LVGL_UI_SCREENS_H
 #define EEZ_LVGL_UI_SCREENS_H
 
-#include <lvgl/lvgl.h>
+#include <lvgl.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,8 +17,12 @@ enum ScreensEnum {
 
 typedef struct _objects_t {
     lv_obj_t *main;
+    lv_obj_t *date_label;
+    lv_obj_t *week_label;
     lv_obj_t *time_label;
-    lv_obj_t *sky;
+    lv_obj_t *weather_image;
+    lv_obj_t *weather_label;
+    lv_obj_t *temprature_label;
 } objects_t;
 
 extern objects_t objects;

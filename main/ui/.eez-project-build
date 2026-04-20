@@ -11,7 +11,8 @@
     "styles.h",
     "ui.c",
     "ui.h",
-    "ui_font_source_han_sans_sc_normal.c",
+    "ui_font_source_han_sans_sc_normal_16.c",
+    "ui_font_source_hans_sans_sc_normal_60.c",
     "vars.h"
   ]
 }

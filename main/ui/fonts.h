@@ -1,13 +1,14 @@
 #ifndef EEZ_LVGL_UI_FONTS_H
 #define EEZ_LVGL_UI_FONTS_H
 
-#include <lvgl/lvgl.h>
+#include <lvgl.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-extern const lv_font_t ui_font_source_han_sans_sc_normal;
+extern const lv_font_t ui_font_source_han_sans_sc_normal_16;
+extern const lv_font_t ui_font_source_hans_sans_sc_normal_60;
 
 #ifndef EXT_FONT_DESC_T
 #define EXT_FONT_DESC_T
