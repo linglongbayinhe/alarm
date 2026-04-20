@@ -52,4 +52,39 @@ menu "Example Configuration"
             BLUFI can proceed with Wi-Fi provisioning.
             - If the user rejects pairing or inputs an incorrect passkey,
             BLUFI will not start Wi-Fi provisioning.
+
+    menu "Application production controls"
+
+        config APP_WEATHER_MOCK_ENABLE
+            bool "Enable weather mock provider"
+            default y
+            help
+                Use the local weather mock provider until the real weather service
+                is wired in. Disable this for production builds that should rely on
+                an external provider or show an empty weather state.
+
+        config APP_WEATHER_MOCK_SCENARIO
+            int "Weather mock scenario"
+            depends on APP_WEATHER_MOCK_ENABLE
+            range 0 15
+            default 1
+            help
+                Weather mock scenario value. Values match weather_mock_scenario_t:
+                0 unknown, 1 clear day, 2 clear night, ... 15 windy.
+
+        config APP_WEATHER_GALLERY_TEST_PAGE
+            bool "Enable weather icon gallery test page"
+            default n
+            help
+                Render the dedicated weather icon gallery test page in the legacy
+                strip renderer. Keep disabled for production LVGL UI builds.
+
+        config APP_LOG_SENSITIVE_DATA
+            bool "Log sensitive provisioning payloads"
+            default n
+            help
+                Development-only switch. Keep disabled for production so Wi-Fi
+                passwords and custom provisioning payloads are never printed.
+
+    endmenu
 endmenu

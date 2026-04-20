@@ -1,7 +1,7 @@
 {
   "navigation": {
     "selectedUserPageObject": "[alarm_design.eez-project]:/userPages/0",
-    "selectedFontObject": "[alarm_design.eez-project]:/fonts/0",
+    "selectedFontObject": "[alarm_design.eez-project]:/fonts/1",
     "subnavigationSelectedItems": {
       "variables-tab/sub-navigation/selected-item": "Widgets"
     }
@@ -168,8 +168,7 @@
                       "enableClose": false,
                       "icon": "svg:hierarchy"
                     }
-                  ],
-                  "active": true
+                  ]
                 },
                 {
                   "type": "tabset",
@@ -192,7 +191,7 @@
             {
               "type": "tabset",
               "id": "EDITORS",
-              "weight": 57.96510623347911,
+              "weight": 51.184747587762836,
               "selected": 1,
               "enableDeleteWhenEmpty": false,
               "enableClose": false,
@@ -220,12 +219,13 @@
                   },
                   "icon": "svg:page"
                 }
-              ]
+              ],
+              "active": true
             },
             {
               "type": "row",
               "id": "#7f002ede-4b17-410b-9a2a-80402270f1b5",
-              "weight": 19.508837206909437,
+              "weight": 26.289195852625713,
               "children": [
                 {
                   "type": "tabset",
@@ -1121,11 +1121,11 @@
   "lvglExpandedPropertiesGroup": [
     "TEXT",
     "MISCELLANEOUS",
-    "ARC"
+    "POSITION AND SIZE"
   ],
   "showInactiveFlowsInDebugger": true,
   "globalFlowZoom": true,
   "flowZoom": 2,
   "implementationLanguage": "C",
-  "openDialogDefaultPath": "D:\\Projects\\AI\\alarm_esp+app\\esp_blufi\\blufi\\main\\ui"
+  "openDialogDefaultPath": "D:\\Projects\\AI\\alarm_esp+app\\font_09_SourceHanSansSC\\OTF\\SimplifiedChinese\\SourceHanSansSC-Normal.otf"
 }

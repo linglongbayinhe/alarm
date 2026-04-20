@@ -36,6 +36,7 @@
 #include "rtc_service.h"
 #include "status_presenter.h"
 #include "time_service.h"
+#include "ui_bridge.h"
 #include "weather_mock_provider.h"
 
 #ifndef CONFIG_SOC_BLUFI_SUPPORTED
@@ -69,9 +70,6 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
 #define WIFI_LIST_NUM   10
 #define EXAMPLE_UI_TASK_STACK_SIZE 4096
 #define EXAMPLE_UI_TASK_PRIORITY   5
-/* Keep weather mock explicit so it can be disabled before wiring a real provider. */
-#define EXAMPLE_USE_WEATHER_MOCK   1
-#define EXAMPLE_WEATHER_MOCK_SCENARIO WEATHER_MOCK_CLEAR_DAY
 
 static wifi_config_t sta_config;
 static wifi_config_t ap_config;
@@ -181,8 +179,8 @@ static void example_ui_task(void *arg)
 
     (void)arg;
 
-#if EXAMPLE_USE_WEATHER_MOCK
-    weather_mock_provider_set_scenario(EXAMPLE_WEATHER_MOCK_SCENARIO);
+#if CONFIG_APP_WEATHER_MOCK_ENABLE
+    weather_mock_provider_set_scenario((weather_mock_scenario_t)CONFIG_APP_WEATHER_MOCK_SCENARIO);
     BLUFI_INFO("Weather mock scenario=%d\n", (int)weather_mock_provider_get_scenario());
 #endif
 
@@ -201,7 +199,7 @@ static void example_ui_task(void *arg)
             presenter_input.wifi_rssi_valid = example_get_wifi_rssi(&presenter_input.wifi_rssi);
         }
 
-#if EXAMPLE_USE_WEATHER_MOCK
+#if CONFIG_APP_WEATHER_MOCK_ENABLE
         ret = weather_mock_provider_get_snapshot(&presenter_input.weather_snapshot);
         presenter_input.weather_snapshot_valid = (ret == ESP_OK);
         if (ret != ESP_OK) {
@@ -226,6 +224,8 @@ static void example_ui_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
+
+        ui_bridge_set_view_model(&view_model);
 
         ret = display_service_render(&view_model);
         if (ret != ESP_OK) {
@@ -568,7 +568,7 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         sta_config.sta.password[param->sta_passwd.passwd_len] = '\0';
         sta_config.sta.threshold.authmode = EXAMPLE_WIFI_SCAN_AUTH_MODE_THRESHOLD;
         esp_wifi_set_config(WIFI_IF_STA, &sta_config);
-        BLUFI_INFO("Recv STA PASSWORD %s\n", sta_config.sta.password);
+        BLUFI_INFO("Recv STA PASSWORD len = %u (hidden)\n", (unsigned int)param->sta_passwd.passwd_len);
         break;
 	case ESP_BLUFI_EVENT_RECV_SOFTAP_SSID:
         if (param->softap_ssid.ssid_len >= sizeof(ap_config.ap.ssid)/sizeof(ap_config.ap.ssid[0])) {
@@ -591,7 +591,7 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         strncpy((char *)ap_config.ap.password, (char *)param->softap_passwd.passwd, param->softap_passwd.passwd_len);
         ap_config.ap.password[param->softap_passwd.passwd_len] = '\0';
         esp_wifi_set_config(WIFI_IF_AP, &ap_config);
-        BLUFI_INFO("Recv SOFTAP PASSWORD %s len = %d\n", ap_config.ap.password, param->softap_passwd.passwd_len);
+        BLUFI_INFO("Recv SOFTAP PASSWORD len = %d (hidden)\n", param->softap_passwd.passwd_len);
         break;
 	case ESP_BLUFI_EVENT_RECV_SOFTAP_MAX_CONN_NUM:
         if (param->softap_max_conn_num.max_conn_num > 4) {
@@ -632,7 +632,11 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
     }
     case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA:
         BLUFI_INFO("Recv Custom Data %" PRIu32 "\n", param->custom_data.data_len);
+#if CONFIG_APP_LOG_SENSITIVE_DATA
         ESP_LOG_BUFFER_HEX("Custom Data", param->custom_data.data, param->custom_data.data_len);
+#else
+        BLUFI_INFO("Custom data payload hidden\n");
+#endif
         break;
 	case ESP_BLUFI_EVENT_RECV_USERNAME:
         /* Not handle currently */

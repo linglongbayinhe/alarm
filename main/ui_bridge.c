@@ -1,7 +1,11 @@
 #include "ui_bridge.h"
 
+#include <stdbool.h>
+#include <string.h>
 #include <time.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "lvgl.h"
 #include "screens.h"
 #include "time_service.h"
@@ -21,17 +25,41 @@ static int s_last_hm = -2;
 static int s_date_y = -1;
 static int s_date_m = -1;
 static int s_date_d = -1;
+static portMUX_TYPE s_weather_panel_lock = portMUX_INITIALIZER_UNLOCKED;
+static display_weather_panel_t s_latest_weather_panel;
+static bool s_latest_weather_panel_valid;
+
+static bool ui_bridge_copy_weather_panel(display_weather_panel_t *panel)
+{
+    bool valid = false;
+
+    if (panel == NULL) {
+        return false;
+    }
+
+    taskENTER_CRITICAL(&s_weather_panel_lock);
+    valid = s_latest_weather_panel_valid;
+    if (valid) {
+        *panel = s_latest_weather_panel;
+    }
+    taskEXIT_CRITICAL(&s_weather_panel_lock);
+
+    return valid;
+}
 
 static void ui_bridge_time_cb(lv_timer_t *timer)
 {
     struct tm now;
     char tbuf[UI_BRIDGE_TIME_BUF_SIZE];
     char dbuf[UI_BRIDGE_DATE_BUF_SIZE];
+    display_weather_panel_t weather_panel;
 
     (void)timer;
 
     if (objects.weather_image != NULL) {
-        weather_lvgl_image_update(objects.weather_image);
+        memset(&weather_panel, 0, sizeof(weather_panel));
+        (void)ui_bridge_copy_weather_panel(&weather_panel);
+        weather_lvgl_image_update(objects.weather_image, &weather_panel);
     }
 
     if (!time_service_has_valid_time()) {
@@ -87,4 +115,16 @@ static void ui_bridge_time_cb(lv_timer_t *timer)
 void ui_bridge_init(void)
 {
     lv_timer_create(ui_bridge_time_cb, UI_BRIDGE_REFRESH_MS, NULL);
+}
+
+void ui_bridge_set_view_model(const display_view_model_t *view_model)
+{
+    if (view_model == NULL) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_weather_panel_lock);
+    s_latest_weather_panel = view_model->weather_panel;
+    s_latest_weather_panel_valid = true;
+    taskEXIT_CRITICAL(&s_weather_panel_lock);
 }

@@ -43,7 +43,6 @@ static const char *DISPLAY_SPIFFS_PARTITION_LABEL = NULL;
 #define DISPLAY_COLOR_WHITE 0xFFFF
 #define DISPLAY_COLOR_BLACK 0x0000
 #define DISPLAY_STATUS_TEXT_BUFFER_SIZE 48
-#define DISPLAY_WEATHER_ICON_GALLERY_ENABLED 0
 #define DISPLAY_TOP_RIGHT_ICON_BOX_SIZE 34
 #define DISPLAY_TOP_RIGHT_ICON_MARGIN_RIGHT 0
 #define DISPLAY_TOP_RIGHT_ICON_MARGIN_TOP 0
@@ -757,7 +756,7 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
         return ESP_OK;
     }
 
-#if DISPLAY_WEATHER_ICON_GALLERY_ENABLED
+#if CONFIG_APP_WEATHER_GALLERY_TEST_PAGE
     time_unchanged = (!view_model->time_valid && !s_last_time_valid) ||
                      (view_model->time_valid &&
                       s_last_time_valid &&
