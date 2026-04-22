@@ -120,13 +120,6 @@ static int display_weather_icon_scale(int value)
            WEATHER_ICON_BASE_SIZE;
 }
 
-static int display_weather_icon_scale_size(int value)
-{
-    int scaled = display_weather_icon_scale(value);
-
-    return scaled < 1 ? 1 : scaled;
-}
-
 static int display_weather_icon_pixel_center_to_logical_q(int pixel)
 {
     return (((pixel * 2 + 1) * WEATHER_ICON_BASE_SIZE * WEATHER_ICON_LOGICAL_SCALE) /

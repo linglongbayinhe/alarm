@@ -22,6 +22,7 @@
 #include "esp_mac.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
@@ -37,7 +38,7 @@
 #include "status_presenter.h"
 #include "time_service.h"
 #include "ui_bridge.h"
-#include "weather_mock_provider.h"
+#include "weather_device_service_provider.h"
 
 #ifndef CONFIG_SOC_BLUFI_SUPPORTED
 #error "This SOC does not support BLUFI"
@@ -94,6 +95,45 @@ static int gl_sta_ssid_len;
 static wifi_sta_list_t gl_sta_list;
 static bool gl_sta_is_connecting = false;
 static esp_blufi_extra_info_t gl_sta_conn_info;
+static bool gl_sta_ssid_received = false;
+static bool gl_sta_password_received = false;
+static bool gl_sta_connect_requested = false;
+
+static void example_log_internal_heap(const char *label)
+{
+    BLUFI_INFO("Heap %s: free=%u largest=%u\n",
+               label,
+               (unsigned int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+               (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+}
+
+static const char *example_wifi_reason_name(uint8_t reason)
+{
+    switch (reason) {
+        case WIFI_REASON_NO_AP_FOUND:
+            return "NO_AP_FOUND";
+        case WIFI_REASON_AUTH_FAIL:
+            return "AUTH_FAIL";
+        case WIFI_REASON_ASSOC_FAIL:
+            return "ASSOC_FAIL";
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+            return "HANDSHAKE_TIMEOUT";
+        case WIFI_REASON_CONNECTION_FAIL:
+            return "CONNECTION_FAIL";
+        case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+            return "NO_AP_COMPATIBLE_SECURITY";
+        case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD:
+            return "NO_AP_AUTHMODE_THRESHOLD";
+        case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD:
+            return "NO_AP_RSSI_THRESHOLD";
+        case WIFI_REASON_BEACON_TIMEOUT:
+            return "BEACON_TIMEOUT";
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+            return "4WAY_HANDSHAKE_TIMEOUT";
+        default:
+            return "OTHER";
+    }
+}
 
 /* Restores the system clock from RTC before network time becomes available. */
 static void example_sync_time_from_rtc(void)
@@ -179,11 +219,6 @@ static void example_ui_task(void *arg)
 
     (void)arg;
 
-#if CONFIG_APP_WEATHER_MOCK_ENABLE
-    weather_mock_provider_set_scenario((weather_mock_scenario_t)CONFIG_APP_WEATHER_MOCK_SCENARIO);
-    BLUFI_INFO("Weather mock scenario=%d\n", (int)weather_mock_provider_get_scenario());
-#endif
-
     while (true) {
         if (time_service_take_sync_notification()) {
             example_sync_rtc_from_system_time();
@@ -199,15 +234,11 @@ static void example_ui_task(void *arg)
             presenter_input.wifi_rssi_valid = example_get_wifi_rssi(&presenter_input.wifi_rssi);
         }
 
-#if CONFIG_APP_WEATHER_MOCK_ENABLE
-        ret = weather_mock_provider_get_snapshot(&presenter_input.weather_snapshot);
+        ret = weather_device_service_provider_get_snapshot(&presenter_input.weather_snapshot);
         presenter_input.weather_snapshot_valid = (ret == ESP_OK);
         if (ret != ESP_OK) {
-            BLUFI_ERROR("Weather mock provider failed: %s\n", esp_err_to_name(ret));
+            BLUFI_ERROR("Weather device provider failed: %s\n", esp_err_to_name(ret));
         }
-#else
-        presenter_input.weather_snapshot_valid = false;
-#endif
 
         if (presenter_input.time_valid) {
             ret = time_service_get_local_time(&presenter_input.current_time);
@@ -252,8 +283,12 @@ static void example_record_wifi_conn_info(int rssi, uint8_t reason)
 
 static void example_wifi_connect(void)
 {
+    esp_err_t ret = ESP_OK;
+
     example_wifi_retry = 0;
-    gl_sta_is_connecting = (esp_wifi_connect() == ESP_OK);
+    ret = esp_wifi_connect();
+    gl_sta_is_connecting = (ret == ESP_OK);
+    BLUFI_INFO("WiFi connect requested: %s\n", esp_err_to_name(ret));
     example_record_wifi_conn_info(EXAMPLE_INVALID_RSSI, EXAMPLE_INVALID_REASON);
 }
 
@@ -262,7 +297,12 @@ static bool example_wifi_reconnect(void)
     bool ret;
     if (gl_sta_is_connecting && example_wifi_retry++ < EXAMPLE_WIFI_CONNECTION_MAXIMUM_RETRY) {
         BLUFI_INFO("BLUFI WiFi starts reconnection\n");
-        gl_sta_is_connecting = (esp_wifi_connect() == ESP_OK);
+        esp_err_t connect_ret = esp_wifi_connect();
+        gl_sta_is_connecting = (connect_ret == ESP_OK);
+        BLUFI_INFO("WiFi reconnect requested: %s retry=%u/%u\n",
+                   esp_err_to_name(connect_ret),
+                   (unsigned int)example_wifi_retry,
+                   (unsigned int)EXAMPLE_WIFI_CONNECTION_MAXIMUM_RETRY);
         example_record_wifi_conn_info(EXAMPLE_INVALID_RSSI, EXAMPLE_INVALID_REASON);
         ret = true;
     } else {
@@ -302,14 +342,20 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base,
         info.sta_ssid = gl_sta_ssid;
         info.sta_ssid_len = gl_sta_ssid_len;
         gl_sta_got_ip = true;
-        ret = time_service_start_sntp();
-        if (ret != ESP_OK) {
-            BLUFI_ERROR("Failed to start SNTP: %s\n", esp_err_to_name(ret));
-        }
+        BLUFI_INFO("WiFi got IP\n");
+        example_log_internal_heap("got_ip");
         if (ble_is_connected == true) {
             esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS, softap_get_current_connection_number(), &info);
         } else {
             BLUFI_INFO("BLUFI BLE is not connected yet\n");
+        }
+        ret = time_service_start_sntp();
+        if (ret != ESP_OK) {
+            BLUFI_ERROR("Failed to start SNTP: %s\n", esp_err_to_name(ret));
+        }
+        ret = weather_device_service_provider_start(wifi_event_group, CONNECTED_BIT);
+        if (ret != ESP_OK) {
+            BLUFI_ERROR("Weather device provider start failed: %s\n", esp_err_to_name(ret));
         }
         break;
     }
@@ -337,12 +383,24 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         memcpy(gl_sta_bssid, event->bssid, 6);
         memcpy(gl_sta_ssid, event->ssid, event->ssid_len);
         gl_sta_ssid_len = event->ssid_len;
+        BLUFI_INFO("WiFi STA connected: ssid_len=%d channel=%d authmode=%d\n",
+                   event->ssid_len,
+                   event->channel,
+                   event->authmode);
         break;
     case WIFI_EVENT_STA_DISCONNECTED:
+        disconnected_event = (wifi_event_sta_disconnected_t*) event_data;
+        BLUFI_INFO("WiFi STA disconnected: reason=%d(%s) rssi=%d was_connected=%d was_connecting=%d retry=%u/%u\n",
+                   disconnected_event->reason,
+                   example_wifi_reason_name(disconnected_event->reason),
+                   disconnected_event->rssi,
+                   gl_sta_connected ? 1 : 0,
+                   gl_sta_is_connecting ? 1 : 0,
+                   (unsigned int)example_wifi_retry,
+                   (unsigned int)EXAMPLE_WIFI_CONNECTION_MAXIMUM_RETRY);
         /* Only handle reconnection during connecting */
         if (gl_sta_connected == false && example_wifi_reconnect() == false) {
             gl_sta_is_connecting = false;
-            disconnected_event = (wifi_event_sta_disconnected_t*) event_data;
             example_record_wifi_conn_info(disconnected_event->rssi, disconnected_event->reason);
         }
         /* This is a workaround as ESP32 WiFi libs don't currently
@@ -497,7 +555,12 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         ESP_ERROR_CHECK( esp_wifi_set_mode(param->wifi_mode.op_mode) );
         break;
     case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP:
-        BLUFI_INFO("BLUFI request wifi connect to AP\n");
+        gl_sta_connect_requested = true;
+        BLUFI_INFO("BLUFI request wifi connect to AP (ssid_received=%d password_received=%d ssid_len=%d)\n",
+                   gl_sta_ssid_received ? 1 : 0,
+                   gl_sta_password_received ? 1 : 0,
+                   gl_sta_ssid_len);
+        example_log_internal_heap("req_connect_to_ap");
         /* there is no wifi callback when the device has already connected to this wifi
         so disconnect wifi before connection.
         */
@@ -530,7 +593,14 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         } else {
             esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_FAIL, softap_get_current_connection_number(), &gl_sta_conn_info);
         }
-        BLUFI_INFO("BLUFI get wifi status from AP\n");
+        BLUFI_INFO("BLUFI get wifi status from AP (got_ip=%d connected=%d connecting=%d ssid_received=%d password_received=%d connect_requested=%d)\n",
+                   gl_sta_got_ip ? 1 : 0,
+                   gl_sta_connected ? 1 : 0,
+                   gl_sta_is_connecting ? 1 : 0,
+                   gl_sta_ssid_received ? 1 : 0,
+                   gl_sta_password_received ? 1 : 0,
+                   gl_sta_connect_requested ? 1 : 0);
+        example_log_internal_heap("get_wifi_status");
 
         break;
     }
@@ -544,8 +614,8 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
 	case ESP_BLUFI_EVENT_RECV_STA_BSSID:
         memcpy(sta_config.sta.bssid, param->sta_bssid.bssid, 6);
         sta_config.sta.bssid_set = 1;
-        esp_wifi_set_config(WIFI_IF_STA, &sta_config);
-        BLUFI_INFO("Recv STA BSSID %s\n", sta_config.sta.ssid);
+        esp_err_t bssid_set_config_ret = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+        BLUFI_INFO("Recv STA BSSID, set_config=%s\n", esp_err_to_name(bssid_set_config_ret));
         break;
 	case ESP_BLUFI_EVENT_RECV_STA_SSID:
         if (param->sta_ssid.ssid_len >= sizeof(sta_config.sta.ssid)/sizeof(sta_config.sta.ssid[0])) {
@@ -555,8 +625,13 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         }
         strncpy((char *)sta_config.sta.ssid, (char *)param->sta_ssid.ssid, param->sta_ssid.ssid_len);
         sta_config.sta.ssid[param->sta_ssid.ssid_len] = '\0';
-        esp_wifi_set_config(WIFI_IF_STA, &sta_config);
-        BLUFI_INFO("Recv STA SSID %s\n", sta_config.sta.ssid);
+        gl_sta_ssid_received = true;
+        esp_err_t ssid_set_config_ret = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+        BLUFI_INFO("Recv STA SSID len=%u value=%s set_config=%s\n",
+                   (unsigned int)param->sta_ssid.ssid_len,
+                   sta_config.sta.ssid,
+                   esp_err_to_name(ssid_set_config_ret));
+        example_log_internal_heap("recv_sta_ssid");
         break;
 	case ESP_BLUFI_EVENT_RECV_STA_PASSWD:
         if (param->sta_passwd.passwd_len >= sizeof(sta_config.sta.password)/sizeof(sta_config.sta.password[0])) {
@@ -567,8 +642,13 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         strncpy((char *)sta_config.sta.password, (char *)param->sta_passwd.passwd, param->sta_passwd.passwd_len);
         sta_config.sta.password[param->sta_passwd.passwd_len] = '\0';
         sta_config.sta.threshold.authmode = EXAMPLE_WIFI_SCAN_AUTH_MODE_THRESHOLD;
-        esp_wifi_set_config(WIFI_IF_STA, &sta_config);
-        BLUFI_INFO("Recv STA PASSWORD len = %u (hidden)\n", (unsigned int)param->sta_passwd.passwd_len);
+        gl_sta_password_received = true;
+        esp_err_t passwd_set_config_ret = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+        BLUFI_INFO("Recv STA PASSWORD len=%u threshold_authmode=%d set_config=%s (hidden)\n",
+                   (unsigned int)param->sta_passwd.passwd_len,
+                   sta_config.sta.threshold.authmode,
+                   esp_err_to_name(passwd_set_config_ret));
+        example_log_internal_heap("recv_sta_password");
         break;
 	case ESP_BLUFI_EVENT_RECV_SOFTAP_SSID:
         if (param->softap_ssid.ssid_len >= sizeof(ap_config.ap.ssid)/sizeof(ap_config.ap.ssid[0])) {

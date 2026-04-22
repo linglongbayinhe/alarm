@@ -19,7 +19,7 @@ static weather_icon_kind_t weather_presenter_map_icon(const weather_snapshot_t *
     return (weather_icon_kind_t)snapshot->condition;
 }
 
-static const char *weather_presenter_condition_text(weather_condition_t condition)
+static const char *weather_presenter_condition_fallback_text(weather_condition_t condition)
 {
     switch (condition) {
         case WEATHER_CONDITION_CLEAR_DAY:
@@ -56,6 +56,20 @@ static const char *weather_presenter_condition_text(weather_condition_t conditio
         default:
             return "UNKNOWN";
     }
+}
+
+static const char *weather_presenter_condition_text(const weather_snapshot_t *snapshot)
+{
+    if (snapshot == NULL) {
+        return "UNKNOWN";
+    }
+
+    if (snapshot->has_weather_text &&
+        (snapshot->weather_text[0] != '\0')) {
+        return snapshot->weather_text;
+    }
+
+    return weather_presenter_condition_fallback_text(snapshot->condition);
 }
 
 static bool weather_presenter_should_show_condition_text(const weather_snapshot_t *snapshot)
@@ -97,7 +111,7 @@ static void weather_presenter_format_temperature(const weather_snapshot_t *snaps
         return;
     }
 
-    snprintf(buffer, buffer_size, "%dC", (int)snapshot->current_temperature_c);
+    snprintf(buffer, buffer_size, "%d℃", (int)snapshot->current_temperature_c);
 }
 
 static void weather_presenter_format_details(const weather_snapshot_t *snapshot,
@@ -234,7 +248,7 @@ esp_err_t weather_presenter_build_panel_model(const weather_snapshot_t *snapshot
                                          sizeof(output->temperature_text));
     weather_presenter_copy_text(output->condition_text,
                                 sizeof(output->condition_text),
-                                weather_presenter_condition_text(snapshot->condition));
+                                weather_presenter_condition_text(snapshot));
     weather_presenter_format_details(snapshot,
                                      output->details_text,
                                      sizeof(output->details_text));

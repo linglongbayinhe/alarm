@@ -1,4 +1,6 @@
 dependencies:
+  espressif/cjson:
+    version: "^1.7.19~2"
   lvgl/lvgl:
     version: "~9.2.0"
     public: true

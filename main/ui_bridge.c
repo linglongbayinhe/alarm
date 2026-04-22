@@ -1,6 +1,7 @@
 #include "ui_bridge.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -8,6 +9,7 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "screens.h"
+#include "status_lvgl_image.h"
 #include "time_service.h"
 #include "weather_lvgl_image.h"
 
@@ -28,6 +30,11 @@ static int s_date_d = -1;
 static portMUX_TYPE s_weather_panel_lock = portMUX_INITIALIZER_UNLOCKED;
 static display_weather_panel_t s_latest_weather_panel;
 static bool s_latest_weather_panel_valid;
+static display_wifi_status_icon_t s_latest_top_right_icon;
+static bool s_latest_top_right_icon_valid;
+static bool s_weather_labels_cached;
+static char s_last_weather_text[DISPLAY_WEATHER_CONDITION_TEXT_SIZE];
+static char s_last_temperature_text[DISPLAY_WEATHER_TEMPERATURE_TEXT_SIZE];
 
 static bool ui_bridge_copy_weather_panel(display_weather_panel_t *panel)
 {
@@ -47,12 +54,60 @@ static bool ui_bridge_copy_weather_panel(display_weather_panel_t *panel)
     return valid;
 }
 
+static bool ui_bridge_copy_top_right_icon(display_wifi_status_icon_t *icon)
+{
+    bool valid = false;
+
+    if (icon == NULL) {
+        return false;
+    }
+
+    taskENTER_CRITICAL(&s_weather_panel_lock);
+    valid = s_latest_top_right_icon_valid;
+    if (valid) {
+        *icon = s_latest_top_right_icon;
+    }
+    taskEXIT_CRITICAL(&s_weather_panel_lock);
+
+    return valid;
+}
+
+static void ui_bridge_update_weather_labels(const display_weather_panel_t *panel)
+{
+    const char *weather_text = "";
+    const char *temperature_text = "";
+
+    if ((panel != NULL) && panel->visible) {
+        weather_text = panel->condition_text;
+        temperature_text = panel->temperature_text;
+    }
+
+    if (!s_weather_labels_cached ||
+        (strcmp(s_last_weather_text, weather_text) != 0)) {
+        if (objects.weather_label != NULL) {
+            lv_label_set_text(objects.weather_label, weather_text);
+        }
+        snprintf(s_last_weather_text, sizeof(s_last_weather_text), "%s", weather_text);
+    }
+
+    if (!s_weather_labels_cached ||
+        (strcmp(s_last_temperature_text, temperature_text) != 0)) {
+        if (objects.temprature_label != NULL) {
+            lv_label_set_text(objects.temprature_label, temperature_text);
+        }
+        snprintf(s_last_temperature_text, sizeof(s_last_temperature_text), "%s", temperature_text);
+    }
+
+    s_weather_labels_cached = true;
+}
+
 static void ui_bridge_time_cb(lv_timer_t *timer)
 {
     struct tm now;
     char tbuf[UI_BRIDGE_TIME_BUF_SIZE];
     char dbuf[UI_BRIDGE_DATE_BUF_SIZE];
     display_weather_panel_t weather_panel;
+    display_wifi_status_icon_t top_right_icon;
 
     (void)timer;
 
@@ -60,6 +115,14 @@ static void ui_bridge_time_cb(lv_timer_t *timer)
         memset(&weather_panel, 0, sizeof(weather_panel));
         (void)ui_bridge_copy_weather_panel(&weather_panel);
         weather_lvgl_image_update(objects.weather_image, &weather_panel);
+        ui_bridge_update_weather_labels(&weather_panel);
+    }
+
+    if (objects.wifi_image != NULL) {
+        memset(&top_right_icon, 0, sizeof(top_right_icon));
+        if (ui_bridge_copy_top_right_icon(&top_right_icon)) {
+            status_lvgl_image_update(objects.wifi_image, &top_right_icon);
+        }
     }
 
     if (!time_service_has_valid_time()) {
@@ -126,5 +189,7 @@ void ui_bridge_set_view_model(const display_view_model_t *view_model)
     taskENTER_CRITICAL(&s_weather_panel_lock);
     s_latest_weather_panel = view_model->weather_panel;
     s_latest_weather_panel_valid = true;
+    s_latest_top_right_icon = view_model->top_right_icon;
+    s_latest_top_right_icon_valid = true;
     taskEXIT_CRITICAL(&s_weather_panel_lock);
 }

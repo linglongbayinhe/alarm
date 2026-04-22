@@ -7,7 +7,9 @@ idf_component_register(SRCS "blufi_example_main.c"
                             "display/display_status_icon_renderer.c"
                             "display/display_weather_icon_renderer.c"
                             "status/status_presenter.c"
+                            "status_lvgl_image.c"
                             "weather/weather_presenter.c"
+                            "weather/weather_device_service_provider.c"
                             "weather/weather_mock_provider.c"
                             "time_service.c"
                             "rtc_service.c"
@@ -31,6 +33,9 @@ idf_component_register(SRCS "blufi_example_main.c"
                                   esp_lcd
                                   spiffs
                                   lwip
+                                  esp_http_client
+                                  esp-tls
+                                  cjson
                                   lvgl
                                   esp_lvgl_port
                     INCLUDE_DIRS "."

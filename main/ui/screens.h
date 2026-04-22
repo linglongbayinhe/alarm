@@ -23,6 +23,7 @@ typedef struct _objects_t {
     lv_obj_t *weather_image;
     lv_obj_t *weather_label;
     lv_obj_t *temprature_label;
+    lv_obj_t *wifi_image;
 } objects_t;
 
 extern objects_t objects;

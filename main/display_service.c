@@ -95,6 +95,7 @@ static const display_glyph_t DISPLAY_GLYPHS[] = {
 
 static const int DISPLAY_LINE_START_Y[DISPLAY_LINE_COUNT] = {0, 48, 104, 160};
 
+#if CONFIG_APP_WEATHER_GALLERY_TEST_PAGE
 static const weather_icon_kind_t DISPLAY_WEATHER_GALLERY_ROW_ONE[] = {
     WEATHER_ICON_CLEAR_DAY,
     WEATHER_ICON_CLEAR_NIGHT,
@@ -122,6 +123,7 @@ static const weather_icon_kind_t DISPLAY_WEATHER_GALLERY_ROW_FOUR[] = {
     WEATHER_ICON_WINDY,
     WEATHER_ICON_UNKNOWN,
 };
+#endif
 
 static bool s_initialized;
 static bool s_use_log_backend;
@@ -170,6 +172,15 @@ static const display_glyph_t *display_find_glyph(char ascii)
 }
 
 static esp_err_t display_push_line_buffer(int line_index);
+
+static void display_release_legacy_line_buffer(void)
+{
+    if (s_line_buffer != NULL) {
+        heap_caps_free(s_line_buffer);
+        s_line_buffer = NULL;
+        ESP_LOGI(TAG, "Released legacy LCD line buffer after LVGL init");
+    }
+}
 
 /* Queues one LCD transfer and blocks until the driver signals that DMA has finished. */
 static esp_err_t display_draw_bitmap_sync(int x_start, int y_start, int x_end, int y_end)
@@ -429,6 +440,7 @@ static esp_err_t display_render_status_date_region(const display_wifi_status_ico
     return display_push_line_buffer(DISPLAY_STATUS_DATE_REGION_INDEX);
 }
 
+#if CONFIG_APP_WEATHER_GALLERY_TEST_PAGE
 /* Draws one row of the weather icon gallery for visual validation. */
 static esp_err_t display_render_weather_gallery_region(int y_start,
                                                        const weather_icon_kind_t *icons,
@@ -512,6 +524,7 @@ static esp_err_t display_render_weather_gallery_page(void)
 
     return display_clear_weather_gallery_bottom_region();
 }
+#endif
 
 /* Clears the dedicated weather region and draws one centered weather icon when requested. */
 static esp_err_t display_render_weather_region(const display_weather_panel_t *panel)
@@ -717,6 +730,8 @@ esp_err_t display_service_init(void)
         if (lvgl_ret != ESP_OK) {
             ESP_LOGW(TAG, "LVGL port init failed: %s (legacy strip renderer still active)",
                      esp_err_to_name(lvgl_ret));
+        } else {
+            display_release_legacy_line_buffer();
         }
     }
 

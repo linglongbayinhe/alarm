@@ -5,6 +5,9 @@
 #include <stdint.h>
 #include <time.h>
 
+#define WEATHER_TEXT_SIZE      64
+#define WEATHER_ICON_TEXT_SIZE 24
+
 typedef enum {
     WEATHER_DATA_STATE_EMPTY = 0,
     WEATHER_DATA_STATE_LOADING = 1,
@@ -45,6 +48,10 @@ typedef struct {
     uint8_t humidity_percent;
     bool has_update_time;
     time_t updated_at_utc;
+    bool has_weather_text;
+    char weather_text[WEATHER_TEXT_SIZE];
+    bool has_weather_icon_text;
+    char weather_icon_text[WEATHER_ICON_TEXT_SIZE];
 } weather_snapshot_t;
 
 #endif

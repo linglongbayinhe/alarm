@@ -24,9 +24,9 @@ typedef struct {
     uint8_t level;
 } display_wifi_status_icon_t;
 
-#define DISPLAY_WEATHER_TEMPERATURE_TEXT_SIZE 8
-#define DISPLAY_WEATHER_CONDITION_TEXT_SIZE  16
-#define DISPLAY_WEATHER_DETAILS_TEXT_SIZE    24
+#define DISPLAY_WEATHER_TEMPERATURE_TEXT_SIZE 12
+#define DISPLAY_WEATHER_CONDITION_TEXT_SIZE  64
+#define DISPLAY_WEATHER_DETAILS_TEXT_SIZE    32
 #define DISPLAY_WEATHER_FOOTER_TEXT_SIZE     24
 
 typedef struct display_weather_panel {

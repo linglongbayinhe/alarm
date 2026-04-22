@@ -89,6 +89,15 @@ void create_screen_main() {
             lv_obj_set_style_text_font(obj, &ui_font_source_han_sans_sc_normal_16, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_label_set_text_static(obj, "25℃");
         }
+        {
+            // wifi_image
+            lv_obj_t *obj = lv_image_create(parent_obj);
+            objects.wifi_image = obj;
+            lv_obj_set_pos(obj, 288, 0);
+            lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+            lv_obj_set_style_width(obj, 32, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_height(obj, 32, LV_PART_MAIN | LV_STATE_DEFAULT);
+        }
     }
     
     tick_screen_main();
