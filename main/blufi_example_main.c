@@ -76,6 +76,8 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
 #define WIFI_LIST_NUM   10
 #define EXAMPLE_UI_TASK_STACK_SIZE 4096
 #define EXAMPLE_UI_TASK_PRIORITY   5
+#define EXAMPLE_RUNTIME_TRANSITION_TASK_STACK_SIZE 4096
+#define EXAMPLE_RUNTIME_TRANSITION_TASK_PRIORITY   4
 
 static wifi_config_t sta_config;
 static wifi_config_t ap_config;
@@ -106,6 +108,7 @@ static bool gl_sta_connect_requested = false;
 static bool s_blufi_active = false;
 static bool s_blufi_resources_released = false;
 static bool s_runtime_services_started = false;
+static TaskHandle_t s_runtime_transition_task_handle = NULL;
 
 static void example_log_internal_heap(const char *label)
 {
@@ -297,6 +300,49 @@ static esp_err_t example_start_runtime_services(void)
     return ESP_OK;
 }
 
+static void example_runtime_transition_task(void *arg)
+{
+    esp_err_t ret = ESP_OK;
+
+    (void)arg;
+
+#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+    if (gl_sta_got_ip && s_blufi_active && !ble_is_connected && !s_blufi_resources_released) {
+        ret = example_release_blufi_resources();
+        if (ret != ESP_OK) {
+            BLUFI_ERROR("Deferred BLUFI release failed: %s\n", esp_err_to_name(ret));
+        }
+    }
+#endif
+
+    if (gl_sta_got_ip) {
+        ret = example_start_runtime_services();
+        if ((ret != ESP_OK) && (ret != ESP_ERR_INVALID_STATE)) {
+            BLUFI_ERROR("Deferred runtime service start failed: %s\n", esp_err_to_name(ret));
+        }
+    }
+
+    s_runtime_transition_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void example_schedule_runtime_transition(void)
+{
+    if (s_runtime_transition_task_handle != NULL) {
+        return;
+    }
+
+    if (xTaskCreate(example_runtime_transition_task,
+                    "runtime_transition",
+                    EXAMPLE_RUNTIME_TRANSITION_TASK_STACK_SIZE,
+                    NULL,
+                    EXAMPLE_RUNTIME_TRANSITION_TASK_PRIORITY,
+                    &s_runtime_transition_task_handle) != pdPASS) {
+        s_runtime_transition_task_handle = NULL;
+        BLUFI_ERROR("Failed to create runtime transition task\n");
+    }
+}
+
 /* Collects raw runtime state once per second and delegates display mapping to the presenter layer. */
 static void example_ui_task(void *arg)
 {
@@ -435,21 +481,13 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base,
             esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS, softap_get_current_connection_number(), &info);
         } else {
             BLUFI_INFO("BLUFI BLE is not connected yet\n");
-            ret = example_release_blufi_resources();
-            if (ret != ESP_OK) {
-                BLUFI_ERROR("Failed to release BLUFI resources: %s\n", esp_err_to_name(ret));
-            }
+            example_schedule_runtime_transition();
         }
         ret = time_service_start_sntp();
         if (ret != ESP_OK) {
             BLUFI_ERROR("Failed to start SNTP: %s\n", esp_err_to_name(ret));
         }
-        ret = example_start_runtime_services();
-        if (ret == ESP_ERR_INVALID_STATE) {
-            BLUFI_INFO("Runtime services deferred until BLUFI resources are released\n");
-        } else if (ret != ESP_OK) {
-            BLUFI_ERROR("Runtime services start failed: %s\n", esp_err_to_name(ret));
-        }
+        example_schedule_runtime_transition();
         break;
     }
     default:
@@ -644,16 +682,7 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         ble_is_connected = false;
         blufi_security_deinit();
         if (gl_sta_got_ip) {
-            esp_err_t release_ret = example_release_blufi_resources();
-            if (release_ret != ESP_OK) {
-                BLUFI_ERROR("Failed to release BLUFI resources after BLE disconnect: %s\n",
-                            esp_err_to_name(release_ret));
-            }
-            release_ret = example_start_runtime_services();
-            if (release_ret != ESP_OK) {
-                BLUFI_ERROR("Failed to start runtime services after BLE disconnect: %s\n",
-                            esp_err_to_name(release_ret));
-            }
+            example_schedule_runtime_transition();
         } else {
             esp_blufi_adv_start();
         }

@@ -20,6 +20,7 @@
 #define AUDIO_SERVICE_INPUT_BUFFER_BYTES 4096
 #define AUDIO_SERVICE_DECODER_INPUT_BYTES 1024
 #define AUDIO_SERVICE_DECODER_OUTPUT_BYTES 8192
+#define AUDIO_SERVICE_TAIL_SILENCE_SAMPLES 512
 
 static const char *TAG = "AUDIO_SERVICE";
 
@@ -89,7 +90,8 @@ static esp_err_t audio_service_ensure_i2s(uint32_t sample_rate)
         i2s_chan_config_t channel_config = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
         i2s_std_config_t std_config = {
             .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate),
-            .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+            // Most plug-in I2S speaker amps expect the standard Philips/I2S slot timing.
+            .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
             .gpio_cfg = {
                 .mclk = I2S_GPIO_UNUSED,
                 .bclk = AUDIO_SERVICE_BCLK,
@@ -290,6 +292,26 @@ static esp_err_t audio_service_write_pcm_16(int16_t *pcm_samples,
     return i2s_channel_write(s_tx_channel, pcm_samples, write_size, &written, portMAX_DELAY);
 }
 
+static void audio_service_finish_output(void)
+{
+    size_t written = 0;
+    int16_t silence_buffer[AUDIO_SERVICE_TAIL_SILENCE_SAMPLES] = {0};
+
+    if (!s_i2s_ready || (s_tx_channel == NULL) || !s_channel_enabled) {
+        return;
+    }
+
+    // Push a short silence tail so the amp does not hold the last decoded sample.
+    (void)i2s_channel_write(s_tx_channel,
+                            silence_buffer,
+                            sizeof(silence_buffer),
+                            &written,
+                            portMAX_DELAY);
+    if (i2s_channel_disable(s_tx_channel) == ESP_OK) {
+        s_channel_enabled = false;
+    }
+}
+
 static esp_err_t audio_service_play_wav(const char *path, uint8_t volume_percent, uint32_t max_duration_ms)
 {
     FILE *file = NULL;
@@ -415,6 +437,7 @@ static esp_err_t audio_service_play_wav(const char *path, uint8_t volume_percent
     free(stereo_buffer);
     free(input_buffer);
     fclose(file);
+    audio_service_finish_output();
 
     ESP_LOGI(TAG, "Playback end: path=%s format=wav result=%s", path, esp_err_to_name(ret));
 
@@ -592,6 +615,7 @@ cleanup:
     if (file != NULL) {
         fclose(file);
     }
+    audio_service_finish_output();
 
     ESP_LOGI(TAG, "Playback end: path=%s format=mp3 result=%s", path, esp_err_to_name(ret));
 

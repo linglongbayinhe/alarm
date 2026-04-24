@@ -67,6 +67,7 @@ static uint32_t s_last_config_generation;
 
 static void playback_task_mark_dirty(bool immediate);
 static void playback_task_flush_state_if_dirty(void);
+static void playback_task_log_next_due(time_t now);
 
 static void playback_task_copy_string(char *destination, size_t destination_size, const char *source)
 {
@@ -856,7 +857,7 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
         play_path = task->local_audio_path;
     } else if (playback_task_allows_fallback(task) && storage_service_default_audio_exists()) {
         play_path = storage_service_get_default_audio_path();
-        format = AUDIO_SERVICE_FORMAT_WAV;
+        format = AUDIO_SERVICE_FORMAT_AUTO;
     } else {
         task->task_status = PLAYBACK_TASK_STATUS_FAILED;
         task->audio_status = PLAYBACK_AUDIO_STATUS_FAILED;
@@ -876,7 +877,7 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
         storage_service_default_audio_exists()) {
         task->audio_status = PLAYBACK_AUDIO_STATUS_FAILED;
         ret = audio_service_play(storage_service_get_default_audio_path(),
-                                 AUDIO_SERVICE_FORMAT_WAV,
+                                 AUDIO_SERVICE_FORMAT_AUTO,
                                  100,
                                  0);
     }
