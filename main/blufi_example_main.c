@@ -33,9 +33,14 @@
 #include "blufi_example.h"
 
 #include "esp_blufi.h"
+#include "audio_cache_service.h"
+#include "audio_service.h"
+#include "device_cloud_service.h"
 #include "display_service.h"
+#include "playback_task_service.h"
 #include "rtc_service.h"
 #include "status_presenter.h"
+#include "storage_service.h"
 #include "time_service.h"
 #include "ui_bridge.h"
 #include "weather_device_service_provider.h"
@@ -98,6 +103,9 @@ static esp_blufi_extra_info_t gl_sta_conn_info;
 static bool gl_sta_ssid_received = false;
 static bool gl_sta_password_received = false;
 static bool gl_sta_connect_requested = false;
+static bool s_blufi_active = false;
+static bool s_blufi_resources_released = false;
+static bool s_runtime_services_started = false;
 
 static void example_log_internal_heap(const char *label)
 {
@@ -208,6 +216,85 @@ static bool example_get_wifi_rssi(int *rssi_out)
     *rssi_out = ap_record.rssi;
 
     return true;
+}
+
+static esp_err_t example_release_blufi_resources(void)
+{
+    esp_err_t ret = ESP_OK;
+
+    if (s_blufi_resources_released || !s_blufi_active) {
+        return ESP_OK;
+    }
+    if (ble_is_connected) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    example_log_internal_heap("before_blufi_release");
+    esp_blufi_adv_stop();
+    blufi_security_deinit();
+
+    ret = esp_blufi_host_deinit();
+    if (ret != ESP_OK) {
+        BLUFI_ERROR("Failed to deinit BLUFI host: %s\n", esp_err_to_name(ret));
+        return ret;
+    }
+
+#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+    ret = esp_blufi_controller_deinit();
+    if (ret != ESP_OK) {
+        BLUFI_ERROR("Failed to deinit BLUFI controller: %s\n", esp_err_to_name(ret));
+        return ret;
+    }
+#if CONFIG_IDF_TARGET_ESP32
+    ret = esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
+    if ((ret != ESP_OK) && (ret != ESP_ERR_INVALID_STATE)) {
+        BLUFI_ERROR("Failed to release BLE memory: %s\n", esp_err_to_name(ret));
+        return ret;
+    }
+#endif
+#endif
+
+    s_blufi_active = false;
+    s_blufi_resources_released = true;
+    example_log_internal_heap("after_blufi_release");
+    return ESP_OK;
+}
+
+static esp_err_t example_start_runtime_services(void)
+{
+    esp_err_t ret = ESP_OK;
+
+    if (s_runtime_services_started) {
+        weather_device_service_provider_request_refresh();
+        playback_task_service_request_sync();
+        return ESP_OK;
+    }
+    if (!gl_sta_got_ip) {
+        return ESP_ERR_INVALID_STATE;
+    }
+#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+    if (s_blufi_active && !s_blufi_resources_released) {
+        BLUFI_INFO("Deferring runtime service start until BLUFI memory is released\n");
+        return ESP_ERR_INVALID_STATE;
+    }
+#endif
+
+    ret = weather_device_service_provider_start(wifi_event_group, CONNECTED_BIT);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    weather_device_service_provider_request_refresh();
+
+    example_log_internal_heap("before_playback_start");
+    ret = playback_task_service_start(wifi_event_group, CONNECTED_BIT);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    example_log_internal_heap("after_playback_start");
+    playback_task_service_request_sync();
+
+    s_runtime_services_started = true;
+    return ESP_OK;
 }
 
 /* Collects raw runtime state once per second and delegates display mapping to the presenter layer. */
@@ -348,14 +435,20 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base,
             esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS, softap_get_current_connection_number(), &info);
         } else {
             BLUFI_INFO("BLUFI BLE is not connected yet\n");
+            ret = example_release_blufi_resources();
+            if (ret != ESP_OK) {
+                BLUFI_ERROR("Failed to release BLUFI resources: %s\n", esp_err_to_name(ret));
+            }
         }
         ret = time_service_start_sntp();
         if (ret != ESP_OK) {
             BLUFI_ERROR("Failed to start SNTP: %s\n", esp_err_to_name(ret));
         }
-        ret = weather_device_service_provider_start(wifi_event_group, CONNECTED_BIT);
-        if (ret != ESP_OK) {
-            BLUFI_ERROR("Weather device provider start failed: %s\n", esp_err_to_name(ret));
+        ret = example_start_runtime_services();
+        if (ret == ESP_ERR_INVALID_STATE) {
+            BLUFI_INFO("Runtime services deferred until BLUFI resources are released\n");
+        } else if (ret != ESP_OK) {
+            BLUFI_ERROR("Runtime services start failed: %s\n", esp_err_to_name(ret));
         }
         break;
     }
@@ -524,11 +617,13 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
     switch (event) {
     case ESP_BLUFI_EVENT_INIT_FINISH:
         BLUFI_INFO("BLUFI init finish\n");
-
+        s_blufi_active = true;
         esp_blufi_adv_start();
         break;
     case ESP_BLUFI_EVENT_DEINIT_FINISH:
         BLUFI_INFO("BLUFI deinit finish\n");
+        s_blufi_active = false;
+        s_blufi_resources_released = true;
         break;
     case ESP_BLUFI_EVENT_BLE_CONNECT:
         BLUFI_INFO("BLUFI ble connect\n");
@@ -548,7 +643,20 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         BLUFI_INFO("BLUFI ble disconnect\n");
         ble_is_connected = false;
         blufi_security_deinit();
-        esp_blufi_adv_start();
+        if (gl_sta_got_ip) {
+            esp_err_t release_ret = example_release_blufi_resources();
+            if (release_ret != ESP_OK) {
+                BLUFI_ERROR("Failed to release BLUFI resources after BLE disconnect: %s\n",
+                            esp_err_to_name(release_ret));
+            }
+            release_ret = example_start_runtime_services();
+            if (release_ret != ESP_OK) {
+                BLUFI_ERROR("Failed to start runtime services after BLE disconnect: %s\n",
+                            esp_err_to_name(release_ret));
+            }
+        } else {
+            esp_blufi_adv_start();
+        }
         break;
     case ESP_BLUFI_EVENT_SET_WIFI_OPMODE:
         BLUFI_INFO("BLUFI Set WIFI opmode %d\n", param->wifi_mode.op_mode);
@@ -717,6 +825,29 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
 #else
         BLUFI_INFO("Custom data payload hidden\n");
 #endif
+        if ((param->custom_data.data != NULL) && (param->custom_data.data_len > 0)) {
+            char *payload = calloc(1, param->custom_data.data_len + 1);
+            if (payload == NULL) {
+                BLUFI_ERROR("Failed to allocate custom data payload buffer\n");
+                break;
+            }
+            memcpy(payload, param->custom_data.data, param->custom_data.data_len);
+            payload[param->custom_data.data_len] = '\0';
+
+            bool changed = false;
+            esp_err_t custom_data_ret = device_cloud_service_update_from_json(payload,
+                                                                              param->custom_data.data_len,
+                                                                              &changed);
+            if (custom_data_ret != ESP_OK) {
+                BLUFI_ERROR("Failed to apply cloud config from custom data: %s\n",
+                            esp_err_to_name(custom_data_ret));
+            } else if (changed) {
+                BLUFI_INFO("Cloud config updated from BLUFI custom data\n");
+                weather_device_service_provider_request_refresh();
+                playback_task_service_request_sync();
+            }
+            free(payload);
+        }
         break;
 	case ESP_BLUFI_EVENT_RECV_USERNAME:
         /* Not handle currently */
@@ -754,8 +885,13 @@ void app_main(void)
     }
     ESP_ERROR_CHECK( ret );
 
+    ESP_ERROR_CHECK(device_cloud_service_init());
+    ESP_ERROR_CHECK(storage_service_init());
+    ESP_ERROR_CHECK(audio_cache_service_init());
+    ESP_ERROR_CHECK(audio_service_init());
     ESP_ERROR_CHECK(display_service_init());
     ESP_ERROR_CHECK(time_service_init());
+    ESP_ERROR_CHECK(playback_task_service_init());
 
     ret = rtc_service_init();
     if (ret != ESP_OK) {
@@ -763,6 +899,23 @@ void app_main(void)
     } else {
         example_sync_time_from_rtc();
     }
+
+#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+    example_log_internal_heap("before_blufi_controller_init");
+    ret = esp_blufi_controller_init();
+    if (ret) {
+        BLUFI_ERROR("%s BLUFI controller init failed: %s\n", __func__, esp_err_to_name(ret));
+        return;
+    }
+#endif
+
+    example_log_internal_heap("before_blufi_host_init");
+    ret = esp_blufi_host_and_cb_init(&example_callbacks);
+    if (ret) {
+        BLUFI_ERROR("%s initialise failed: %s\n", __func__, esp_err_to_name(ret));
+        return;
+    }
+    example_log_internal_heap("after_blufi_host_init");
 
     task_created = xTaskCreate(example_ui_task,
                                "example_ui_task",
@@ -776,20 +929,6 @@ void app_main(void)
     }
 
     initialise_wifi();
-
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
-    ret = esp_blufi_controller_init();
-    if (ret) {
-        BLUFI_ERROR("%s BLUFI controller init failed: %s\n", __func__, esp_err_to_name(ret));
-        return;
-    }
-#endif
-
-    ret = esp_blufi_host_and_cb_init(&example_callbacks);
-    if (ret) {
-        BLUFI_ERROR("%s initialise failed: %s\n", __func__, esp_err_to_name(ret));
-        return;
-    }
 
     BLUFI_INFO("BLUFI VERSION %04x\n", esp_blufi_get_version());
 }

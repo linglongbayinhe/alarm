@@ -1,12 +1,17 @@
 idf_component_register(SRCS "blufi_example_main.c"
+                            "audio_cache_service.c"
+                            "audio_service.c"
                             "blufi_security.c"
                             "blufi_init.c"
+                            "device_cloud_service.c"
                             "display_lvgl.c"
                             "display_service.c"
                             "fonts/SourceHanSans_Normal_16.c"
+                            "playback_task_service.c"
                             "display/display_status_icon_renderer.c"
                             "display/display_weather_icon_renderer.c"
                             "status/status_presenter.c"
+                            "storage_service.c"
                             "status_lvgl_image.c"
                             "weather/weather_presenter.c"
                             "weather/weather_device_service_provider.c"
@@ -28,10 +33,15 @@ idf_component_register(SRCS "blufi_example_main.c"
                                   nvs_flash
                                   mbedtls
                                   esp_driver_i2c
+                                  esp_driver_i2s
                                   esp_driver_gpio
                                   esp_driver_spi
                                   esp_lcd
                                   spiffs
+                                  fatfs
+                                  wear_levelling
+                                  spi_flash
+                                  esp_partition
                                   lwip
                                   esp_http_client
                                   esp-tls
@@ -44,3 +54,5 @@ idf_component_register(SRCS "blufi_example_main.c"
                                  "status"
                                  "weather"
                                  "wifi")
+
+spiffs_create_partition_image(storage ../spiffs_image FLASH_IN_PROJECT)

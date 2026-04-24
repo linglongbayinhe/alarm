@@ -8,33 +8,21 @@
 #include <time.h>
 
 #include "cJSON.h"
-#include "esp_crt_bundle.h"
-#include "esp_http_client.h"
+#include "device_cloud_service.h"
 #include "esp_log.h"
 #include "freertos/task.h"
 #include "time_service.h"
 
-#define DEVICE_API_URL "https://fc-mp-569ac274-a245-482f-994d-e065e5e73b0b.next.bspapp.com/device-service/getDeviceDisplayState"
-#define CLIENT_ID      "client_1776770443964_jmxlxc"
-#define DEVICE_ID      "dev_demo_001"
-
-#define WEATHER_DEVICE_POST_BODY "{\"clientId\":\"" CLIENT_ID "\",\"deviceId\":\"" DEVICE_ID "\"}"
-#define WEATHER_DEVICE_POLL_INTERVAL_MS 30000
-#define WEATHER_DEVICE_HTTP_TIMEOUT_MS  10000
-#define WEATHER_DEVICE_RESPONSE_BYTES   4096
-#define WEATHER_DEVICE_TASK_STACK_SIZE  6144
-#define WEATHER_DEVICE_TASK_PRIORITY    4
-#define WEATHER_DEVICE_TIME_WAIT_MS     1000
-#define WEATHER_DEVICE_TIME_LOG_MS      5000
+#define WEATHER_DEVICE_RESPONSE_BYTES              1536
+#define WEATHER_DEVICE_TASK_STACK_SIZE             8192
+#define WEATHER_DEVICE_TASK_PRIORITY               4
+#define WEATHER_DEVICE_TIME_WAIT_MS                5000
+#define WEATHER_DEVICE_TIME_LOG_MS                 30000
+#define WEATHER_DEVICE_NOTIFY_REFRESH              BIT0
+#define WEATHER_DEVICE_RETRY_FIRST_SECONDS         (30 * 60)
+#define WEATHER_DEVICE_RETRY_MAX_SECONDS           (60 * 60)
 
 static const char *TAG = "WEATHER_DEVICE";
-
-typedef struct {
-    char *data;
-    size_t capacity;
-    size_t length;
-    bool truncated;
-} weather_device_http_response_t;
 
 static portMUX_TYPE s_snapshot_lock = portMUX_INITIALIZER_UNLOCKED;
 static weather_snapshot_t s_latest_snapshot;
@@ -43,6 +31,7 @@ static bool s_has_successful_snapshot;
 static EventGroupHandle_t s_connected_event_group;
 static EventBits_t s_connected_bit;
 static TaskHandle_t s_task_handle;
+static uint32_t s_last_cloud_generation;
 
 static void weather_device_copy_text(char *destination, size_t destination_size, const char *source)
 {
@@ -170,45 +159,6 @@ static void weather_device_publish_simple_state(weather_data_state_t state)
     weather_device_publish_snapshot(&snapshot, false);
 }
 
-static esp_err_t weather_device_http_event_handler(esp_http_client_event_t *event)
-{
-    weather_device_http_response_t *response = NULL;
-    size_t remaining = 0;
-    size_t copy_len = 0;
-
-    if ((event == NULL) || (event->user_data == NULL)) {
-        return ESP_OK;
-    }
-
-    response = (weather_device_http_response_t *)event->user_data;
-
-    if ((event->event_id != HTTP_EVENT_ON_DATA) || (event->data == NULL) || (event->data_len <= 0)) {
-        return ESP_OK;
-    }
-
-    if ((response->data == NULL) || (response->capacity == 0)) {
-        return ESP_OK;
-    }
-
-    if ((response->length + 1) >= response->capacity) {
-        response->truncated = true;
-        return ESP_OK;
-    }
-
-    remaining = response->capacity - response->length - 1;
-    copy_len = (size_t)event->data_len;
-    if (copy_len > remaining) {
-        copy_len = remaining;
-        response->truncated = true;
-    }
-
-    memcpy(response->data + response->length, event->data, copy_len);
-    response->length += copy_len;
-    response->data[response->length] = '\0';
-
-    return ESP_OK;
-}
-
 static esp_err_t weather_device_parse_response(const char *json, weather_snapshot_t *snapshot)
 {
     esp_err_t ret = ESP_FAIL;
@@ -217,6 +167,9 @@ static esp_err_t weather_device_parse_response(const char *json, weather_snapsho
     const cJSON *temperature = NULL;
     const cJSON *weather_icon = NULL;
     const cJSON *weather_text = NULL;
+    const cJSON *target_volume = NULL;
+    const cJSON *current_volume = NULL;
+    const cJSON *volume_level = NULL;
     weather_condition_t condition = WEATHER_CONDITION_UNKNOWN;
 
     if ((json == NULL) || (snapshot == NULL)) {
@@ -238,6 +191,9 @@ static esp_err_t weather_device_parse_response(const char *json, weather_snapsho
     temperature = cJSON_GetObjectItemCaseSensitive(root, "temperature");
     weather_icon = cJSON_GetObjectItemCaseSensitive(root, "weatherIcon");
     weather_text = cJSON_GetObjectItemCaseSensitive(root, "weatherText");
+    target_volume = cJSON_GetObjectItemCaseSensitive(root, "targetVolume");
+    current_volume = cJSON_GetObjectItemCaseSensitive(root, "currentVolume");
+    volume_level = cJSON_GetObjectItemCaseSensitive(root, "volumeLevel");
 
     if (!cJSON_IsNumber(temperature)) {
         ESP_LOGE(TAG, "Device service JSON missing numeric temperature");
@@ -270,12 +226,25 @@ static esp_err_t weather_device_parse_response(const char *json, weather_snapsho
                                  sizeof(snapshot->weather_text),
                                  weather_text->valuestring);
     }
+    if (cJSON_IsNumber(target_volume)) {
+        snapshot->has_target_volume = true;
+        snapshot->target_volume = (int16_t)target_volume->valueint;
+    }
+    if (cJSON_IsNumber(current_volume)) {
+        snapshot->has_current_volume = true;
+        snapshot->current_volume = (int16_t)current_volume->valueint;
+    }
+    if (cJSON_IsNumber(volume_level)) {
+        snapshot->has_volume_level = true;
+        snapshot->volume_level = (int16_t)volume_level->valueint;
+    }
 
     ESP_LOGI(TAG,
-             "Parsed device weather: temperature=%d, weatherIcon=%s, weatherText=%s",
+             "Parsed display state: temperature=%d, weatherIcon=%s, weatherText=%s, volume=%d",
              (int)snapshot->current_temperature_c,
              snapshot->weather_icon_text,
-             snapshot->has_weather_text ? snapshot->weather_text : "");
+             snapshot->has_weather_text ? snapshot->weather_text : "",
+             snapshot->has_volume_level ? (int)snapshot->volume_level : -1);
     ret = ESP_OK;
 
 cleanup:
@@ -283,100 +252,81 @@ cleanup:
     return ret;
 }
 
-static esp_err_t weather_device_fetch_once(void)
+static esp_err_t weather_device_fetch_once(device_cloud_session_t *session,
+                                           device_cloud_http_response_t *response,
+                                           char *request_body,
+                                           size_t request_body_size)
 {
+    device_cloud_config_t cloud_config = {0};
     esp_err_t ret = ESP_OK;
-    int status_code = 0;
-    weather_device_http_response_t response = {0};
     weather_snapshot_t snapshot = {0};
-    esp_http_client_handle_t client = NULL;
-    esp_http_client_config_t config = {
-        .url = DEVICE_API_URL,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = WEATHER_DEVICE_HTTP_TIMEOUT_MS,
-        .event_handler = weather_device_http_event_handler,
-        .user_data = &response,
-#if defined(CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY) && CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY
-        .skip_cert_common_name_check = true,
-#else
-        .crt_bundle_attach = esp_crt_bundle_attach,
-#endif
-    };
 
-    response.data = (char *)calloc(1, WEATHER_DEVICE_RESPONSE_BYTES);
-    if (response.data == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-    response.capacity = WEATHER_DEVICE_RESPONSE_BYTES;
-
-    client = esp_http_client_init(&config);
-    if (client == NULL) {
-        free(response.data);
-        return ESP_FAIL;
+    if ((session == NULL) || (response == NULL) || (request_body == NULL) || (request_body_size == 0)) {
+        return ESP_ERR_INVALID_ARG;
     }
 
-#if defined(CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY) && CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY
-    ESP_LOGW(TAG, "TLS server certificate verification is disabled for quick integration");
-#endif
-    ESP_LOGI(TAG, "POST %s clientId=%s deviceId=%s", DEVICE_API_URL, CLIENT_ID, DEVICE_ID);
-    ret = esp_http_client_set_header(client, "Content-Type", "application/json");
+    ret = device_cloud_service_get_config(&cloud_config);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set Content-Type header: %s", esp_err_to_name(ret));
-        goto cleanup;
-    }
-    ret = esp_http_client_set_header(client, "Accept", "application/json");
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set Accept header: %s", esp_err_to_name(ret));
-        goto cleanup;
-    }
-    ret = esp_http_client_set_post_field(client,
-                                         WEATHER_DEVICE_POST_BODY,
-                                         (int)strlen(WEATHER_DEVICE_POST_BODY));
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set POST body: %s", esp_err_to_name(ret));
-        goto cleanup;
+        return ret;
     }
 
-    ret = esp_http_client_perform(client);
+    ret = device_cloud_service_build_device_request_json(request_body, request_body_size);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Device service request failed: %s", esp_err_to_name(ret));
-        goto cleanup;
+        return ret;
     }
 
-    status_code = esp_http_client_get_status_code(client);
-    if (response.truncated) {
+    ESP_LOGI(TAG, "POST %s", cloud_config.display_state_url);
+    ret = device_cloud_session_post_json(session, cloud_config.display_state_url, request_body, response);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "Device display request failed: status=%d body=%s",
+                 response->status_code,
+                 response->buffer == NULL ? "" : response->buffer);
+        return ret;
+    }
+
+    if (response->truncated) {
         ESP_LOGW(TAG, "Device service response truncated to %u bytes",
-                 (unsigned int)(WEATHER_DEVICE_RESPONSE_BYTES - 1));
-    }
-    ESP_LOGI(TAG, "Raw JSON: %s", response.data);
-
-    if ((status_code < 200) || (status_code >= 300)) {
-        ESP_LOGE(TAG, "Device service returned HTTP status %d", status_code);
-        ret = ESP_FAIL;
-        goto cleanup;
+                 (unsigned int)(response->buffer_size - 1));
+        return ESP_ERR_INVALID_SIZE;
     }
 
-    ret = weather_device_parse_response(response.data, &snapshot);
+    ESP_LOGI(TAG, "Raw JSON: %s", response->buffer == NULL ? "" : response->buffer);
+
+    ret = weather_device_parse_response(response->buffer, &snapshot);
     if (ret == ESP_OK) {
         weather_device_publish_snapshot(&snapshot, true);
     }
 
-cleanup:
-    esp_http_client_cleanup(client);
-    free(response.data);
     return ret;
 }
 
-static bool weather_device_wait_for_valid_time(void)
+static uint32_t weather_device_next_retry_seconds(uint32_t failure_count,
+                                                  const device_cloud_config_t *config)
+{
+    if ((config != NULL) && (failure_count == 0U)) {
+        return config->display_poll_seconds > 0U
+                   ? config->display_poll_seconds
+                   : (15U * 60U);
+    }
+    if (failure_count <= 1U) {
+        return WEATHER_DEVICE_RETRY_FIRST_SECONDS;
+    }
+
+    return WEATHER_DEVICE_RETRY_MAX_SECONDS;
+}
+
+static TickType_t weather_device_wait_for_time_or_refresh(bool *refresh_requested)
 {
     int waited_ms = 0;
 
     while (!time_service_has_valid_time()) {
+        uint32_t notify_bits = 0;
         EventBits_t bits = xEventGroupGetBits(s_connected_event_group);
 
         if ((bits & s_connected_bit) == 0) {
             ESP_LOGW(TAG, "Wi-Fi disconnected while waiting for valid time");
-            return false;
+            return portMAX_DELAY;
         }
 
         if ((waited_ms % WEATHER_DEVICE_TIME_LOG_MS) == 0) {
@@ -384,46 +334,108 @@ static bool weather_device_wait_for_valid_time(void)
         }
 
         weather_device_publish_simple_state(WEATHER_DATA_STATE_LOADING);
-        vTaskDelay(pdMS_TO_TICKS(WEATHER_DEVICE_TIME_WAIT_MS));
+        xTaskNotifyWait(0, UINT32_MAX, &notify_bits, pdMS_TO_TICKS(WEATHER_DEVICE_TIME_WAIT_MS));
+        if ((notify_bits & WEATHER_DEVICE_NOTIFY_REFRESH) != 0U) {
+            *refresh_requested = true;
+        }
         waited_ms += WEATHER_DEVICE_TIME_WAIT_MS;
     }
 
     if (waited_ms > 0) {
         ESP_LOGI(TAG, "System time is valid; starting weather HTTPS request");
+        *refresh_requested = true;
     }
 
-    return true;
+    return 0;
 }
 
 static void weather_device_provider_task(void *arg)
 {
+    char request_body[256] = {0};
+    char *response_buffer = NULL;
+    device_cloud_http_response_t response = {0};
+    device_cloud_session_t session = {0};
+    uint32_t failure_count = 0;
+    bool refresh_requested = true;
+    time_t next_refresh_epoch = 0;
+
     (void)arg;
 
+    response_buffer = calloc(1, WEATHER_DEVICE_RESPONSE_BYTES);
+    if (response_buffer == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate weather response buffer");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    response.buffer = response_buffer;
+    response.buffer_size = WEATHER_DEVICE_RESPONSE_BYTES;
+    device_cloud_session_init(&session, response_buffer, WEATHER_DEVICE_RESPONSE_BYTES);
+
     while (true) {
+        device_cloud_config_t config = {0};
+        uint32_t notify_bits = 0;
+        bool timed_out = false;
+        time_t now = 0;
+        TickType_t wait_ticks = portMAX_DELAY;
+
         xEventGroupWaitBits(s_connected_event_group,
                             s_connected_bit,
                             pdFALSE,
                             pdTRUE,
                             portMAX_DELAY);
 
-        if (!weather_device_wait_for_valid_time()) {
+        if (device_cloud_service_get_generation() != s_last_cloud_generation) {
+            s_last_cloud_generation = device_cloud_service_get_generation();
+            refresh_requested = true;
+        }
+
+        if (weather_device_wait_for_time_or_refresh(&refresh_requested) == portMAX_DELAY) {
+            next_refresh_epoch = 0;
             continue;
         }
 
-        if (weather_device_fetch_once() != ESP_OK) {
-            if (!weather_device_has_successful_snapshot()) {
-                weather_device_publish_simple_state(WEATHER_DATA_STATE_ERROR);
-            }
+        if (device_cloud_service_get_config(&config) != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
 
-        for (int elapsed_ms = 0;
-             elapsed_ms < WEATHER_DEVICE_POLL_INTERVAL_MS;
-             elapsed_ms += 1000) {
-            EventBits_t bits = xEventGroupGetBits(s_connected_event_group);
-            if ((bits & s_connected_bit) == 0) {
-                break;
+        now = time(NULL);
+        if (refresh_requested || (next_refresh_epoch == 0) || (now >= next_refresh_epoch)) {
+            if (weather_device_fetch_once(&session, &response, request_body, sizeof(request_body)) == ESP_OK) {
+                failure_count = 0;
+            } else {
+                ++failure_count;
+                if (!weather_device_has_successful_snapshot()) {
+                    weather_device_publish_simple_state(WEATHER_DATA_STATE_ERROR);
+                }
             }
-            vTaskDelay(pdMS_TO_TICKS(1000));
+
+            next_refresh_epoch = time(NULL) + (time_t)weather_device_next_retry_seconds(failure_count, &config);
+            refresh_requested = false;
+        }
+
+        now = time(NULL);
+        if (next_refresh_epoch <= now) {
+            wait_ticks = 0;
+        } else {
+            uint32_t wait_seconds = (uint32_t)(next_refresh_epoch - now);
+            wait_ticks = pdMS_TO_TICKS(wait_seconds * 1000U);
+        }
+
+        if (xTaskNotifyWait(0, UINT32_MAX, &notify_bits, wait_ticks) == pdFALSE) {
+            timed_out = true;
+        }
+
+        if ((notify_bits & WEATHER_DEVICE_NOTIFY_REFRESH) != 0U) {
+            refresh_requested = true;
+        }
+        if (device_cloud_service_get_generation() != s_last_cloud_generation) {
+            s_last_cloud_generation = device_cloud_service_get_generation();
+            refresh_requested = true;
+        }
+        if (timed_out) {
+            refresh_requested = true;
         }
     }
 }
@@ -438,11 +450,13 @@ esp_err_t weather_device_service_provider_start(EventGroupHandle_t connected_eve
     }
 
     if (s_task_handle != NULL) {
+        weather_device_service_provider_request_refresh();
         return ESP_OK;
     }
 
     s_connected_event_group = connected_event_group;
     s_connected_bit = connected_bit;
+    s_last_cloud_generation = device_cloud_service_get_generation();
     weather_device_publish_simple_state(WEATHER_DATA_STATE_LOADING);
 
     task_created = xTaskCreate(weather_device_provider_task,
@@ -456,6 +470,7 @@ esp_err_t weather_device_service_provider_start(EventGroupHandle_t connected_eve
         return ESP_ERR_NO_MEM;
     }
 
+    weather_device_service_provider_request_refresh();
     return ESP_OK;
 }
 
@@ -477,4 +492,13 @@ esp_err_t weather_device_service_provider_get_snapshot(weather_snapshot_t *snaps
     taskEXIT_CRITICAL(&s_snapshot_lock);
 
     return ESP_OK;
+}
+
+void weather_device_service_provider_request_refresh(void)
+{
+    if (s_task_handle == NULL) {
+        return;
+    }
+
+    xTaskNotify(s_task_handle, WEATHER_DEVICE_NOTIFY_REFRESH, eSetBits);
 }

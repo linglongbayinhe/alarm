@@ -55,6 +55,14 @@ menu "Example Configuration"
 
     menu "Application production controls"
 
+        config APP_EXTERNAL_AUDIO_CACHE_ENABLE
+            bool "Enable external audio cache (W25Q128)"
+            default n
+            help
+                Enable initialization of the external SPI flash audio cache.
+                Keep this disabled while validating internal SPIFFS fallback
+                audio and local alarm playback without W25Q128 involvement.
+
         config APP_WEATHER_MOCK_ENABLE
             bool "Enable weather mock provider"
             default y

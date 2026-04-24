@@ -52,6 +52,12 @@ typedef struct {
     char weather_text[WEATHER_TEXT_SIZE];
     bool has_weather_icon_text;
     char weather_icon_text[WEATHER_ICON_TEXT_SIZE];
+    bool has_target_volume;
+    int16_t target_volume;
+    bool has_current_volume;
+    int16_t current_volume;
+    bool has_volume_level;
+    int16_t volume_level;
 } weather_snapshot_t;
 
 #endif
