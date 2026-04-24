@@ -1,6 +1,7 @@
 #include "playback_task_service.h"
 
 #include <ctype.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -712,6 +713,7 @@ static esp_err_t playback_task_sync_from_cloud(device_cloud_session_t *session,
         return ret;
     }
 
+    ESP_LOGI(TAG, "POST %s", config.pull_tasks_url);
     ret = device_cloud_session_post_json(session, config.pull_tasks_url, request_body, response);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "pullPlaybackTasks failed: status=%d body=%s",
@@ -719,6 +721,11 @@ static esp_err_t playback_task_sync_from_cloud(device_cloud_session_t *session,
                  response->buffer == NULL ? "" : response->buffer);
         return ret;
     }
+    if (response->truncated) {
+        ESP_LOGW(TAG, "pullPlaybackTasks response truncated to %u bytes",
+                 (unsigned int)(response->buffer_size > 0 ? (response->buffer_size - 1) : 0));
+    }
+    ESP_LOGI(TAG, "pullPlaybackTasks raw JSON: %s", response->buffer == NULL ? "" : response->buffer);
 
     root = cJSON_Parse(response->buffer);
     if (root == NULL) {
@@ -774,6 +781,7 @@ static esp_err_t playback_task_sync_from_cloud(device_cloud_session_t *session,
     }
 
     ESP_LOGI(TAG, "Synced %u playback tasks", (unsigned int)s_task_count);
+    playback_task_log_next_due(now);
     ret = ESP_OK;
 
 cleanup:
@@ -936,6 +944,49 @@ static int64_t playback_task_next_due_epoch(time_t now)
     }
 
     return 0;
+}
+
+static void playback_task_log_next_due(time_t now)
+{
+    int64_t next_due_epoch = 0;
+    size_t index = 0;
+
+    next_due_epoch = playback_task_next_due_epoch(now);
+    if (next_due_epoch <= 0) {
+        ESP_LOGI(TAG, "No pending playback task in local queue");
+        return;
+    }
+
+    for (index = 0; index < s_task_count; ++index) {
+        const playback_task_t *task = &s_tasks[index];
+
+        if ((task->task_status == PLAYBACK_TASK_STATUS_FINISHED) ||
+            (task->task_status == PLAYBACK_TASK_STATUS_FAILED) ||
+            (task->task_status == PLAYBACK_TASK_STATUS_PLAYING)) {
+            continue;
+        }
+        if (task->ring_at_epoch == next_due_epoch) {
+            struct tm local_time = {0};
+            char time_buffer[32] = {0};
+            time_t printable_time = (time_t)task->ring_at_epoch;
+
+            if (localtime_r(&printable_time, &local_time) != NULL) {
+                strftime(time_buffer, sizeof(time_buffer), "%Y-%m-%d %H:%M:%S", &local_time);
+            } else {
+                snprintf(time_buffer, sizeof(time_buffer), "%" PRId64, task->ring_at_epoch);
+            }
+
+            ESP_LOGI(TAG,
+                     "Next due task: instance=%s ringAt=%s status=%s audio=%s",
+                     task->instance_id,
+                     time_buffer,
+                     playback_task_status_to_string((playback_task_status_t)task->task_status),
+                     playback_audio_status_to_string((playback_audio_status_t)task->audio_status));
+            return;
+        }
+    }
+
+    ESP_LOGI(TAG, "Next due epoch=%" PRId64 " but no matching task found", next_due_epoch);
 }
 
 static TickType_t playback_task_compute_wait_ticks(time_t now, time_t next_sync_epoch)
