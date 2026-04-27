@@ -1,4 +1,4 @@
-idf_component_register(SRCS "blufi_example_main.c"
+idf_component_register(SRCS "main.c"
                             "audio_cache_service.c"
                             "audio_service.c"
                             "blufi_security.c"
@@ -55,4 +55,4 @@ idf_component_register(SRCS "blufi_example_main.c"
                                  "weather"
                                  "wifi")
 
-spiffs_create_partition_image(storage ../spiffs_image FLASH_IN_PROJECT)
+spiffs_create_partition_image(storage ../audio FLASH_IN_PROJECT)

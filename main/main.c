@@ -286,7 +286,6 @@ static esp_err_t example_start_runtime_services(void)
     if (ret != ESP_OK) {
         return ret;
     }
-    weather_device_service_provider_request_refresh();
 
     example_log_internal_heap("before_playback_start");
     ret = playback_task_service_start(wifi_event_group, CONNECTED_BIT);
@@ -294,7 +293,6 @@ static esp_err_t example_start_runtime_services(void)
         return ret;
     }
     example_log_internal_heap("after_playback_start");
-    playback_task_service_request_sync();
 
     s_runtime_services_started = true;
     return ESP_OK;

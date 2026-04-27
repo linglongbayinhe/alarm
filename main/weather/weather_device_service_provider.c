@@ -19,6 +19,7 @@
 #define WEATHER_DEVICE_TIME_WAIT_MS                5000
 #define WEATHER_DEVICE_TIME_LOG_MS                 30000
 #define WEATHER_DEVICE_NOTIFY_REFRESH              BIT0
+#define WEATHER_DEVICE_INITIAL_DELAY_SECONDS       20
 #define WEATHER_DEVICE_RETRY_FIRST_SECONDS         (30 * 60)
 #define WEATHER_DEVICE_RETRY_MAX_SECONDS           (60 * 60)
 
@@ -356,7 +357,8 @@ static void weather_device_provider_task(void *arg)
     device_cloud_http_response_t response = {0};
     device_cloud_session_t session = {0};
     uint32_t failure_count = 0;
-    bool refresh_requested = true;
+    bool refresh_requested = false;
+    bool initial_delay_scheduled = false;
     time_t next_refresh_epoch = 0;
 
     (void)arg;
@@ -388,6 +390,7 @@ static void weather_device_provider_task(void *arg)
         if (device_cloud_service_get_generation() != s_last_cloud_generation) {
             s_last_cloud_generation = device_cloud_service_get_generation();
             refresh_requested = true;
+            initial_delay_scheduled = true;
         }
 
         if (weather_device_wait_for_time_or_refresh(&refresh_requested) == portMAX_DELAY) {
@@ -401,6 +404,13 @@ static void weather_device_provider_task(void *arg)
         }
 
         now = time(NULL);
+        if (!refresh_requested && !initial_delay_scheduled && (next_refresh_epoch == 0)) {
+            next_refresh_epoch = now + WEATHER_DEVICE_INITIAL_DELAY_SECONDS;
+            initial_delay_scheduled = true;
+            ESP_LOGI(TAG,
+                     "Delaying initial weather HTTPS request by %u s",
+                     (unsigned int)WEATHER_DEVICE_INITIAL_DELAY_SECONDS);
+        }
         if (refresh_requested || (next_refresh_epoch == 0) || (now >= next_refresh_epoch)) {
             if (weather_device_fetch_once(&session, &response, request_body, sizeof(request_body)) == ESP_OK) {
                 failure_count = 0;
@@ -470,7 +480,6 @@ esp_err_t weather_device_service_provider_start(EventGroupHandle_t connected_eve
         return ESP_ERR_NO_MEM;
     }
 
-    weather_device_service_provider_request_refresh();
     return ESP_OK;
 }
 

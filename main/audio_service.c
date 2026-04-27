@@ -12,6 +12,7 @@
 #include "esp_audio_dec_default.h"
 #include "esp_audio_simple_dec.h"
 #include "esp_audio_simple_dec_default.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #define AUDIO_SERVICE_BCLK GPIO_NUM_14
@@ -38,6 +39,15 @@ static bool s_i2s_ready;
 static bool s_channel_enabled;
 static uint32_t s_current_sample_rate;
 static bool s_decoder_registered;
+
+static void audio_service_log_heap(const char *stage)
+{
+    ESP_LOGI(TAG,
+             "Heap %s: free=%u largest=%u",
+             stage == NULL ? "unknown" : stage,
+             (unsigned int)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+}
 
 static uint16_t audio_service_read_u16_le(const uint8_t *buffer)
 {
@@ -467,13 +477,22 @@ static esp_err_t audio_service_play_mp3(const char *path, uint8_t volume_percent
         return ESP_ERR_NOT_FOUND;
     }
 
+    audio_service_log_heap("mp3_before_buffers");
     input_buffer = calloc(1, AUDIO_SERVICE_DECODER_INPUT_BYTES);
     output_buffer = calloc(1, output_buffer_size);
     stereo_buffer = calloc(1, output_buffer_size * 2U);
     if ((input_buffer == NULL) || (output_buffer == NULL) || (stereo_buffer == NULL)) {
+        audio_service_log_heap("mp3_buffer_alloc_failed");
         ret = ESP_ERR_NO_MEM;
         goto cleanup;
     }
+    ESP_LOGI(TAG,
+             "MP3 buffers allocated: input=%u output=%u stereo=%u total=%u",
+             (unsigned int)AUDIO_SERVICE_DECODER_INPUT_BYTES,
+             (unsigned int)output_buffer_size,
+             (unsigned int)(output_buffer_size * 2U),
+             (unsigned int)(AUDIO_SERVICE_DECODER_INPUT_BYTES + output_buffer_size + (output_buffer_size * 2U)));
+    audio_service_log_heap("mp3_after_buffers");
 
     if ((max_duration_ms > 0U)) {
         max_frames = ((uint64_t)48000U * (uint64_t)max_duration_ms) / 1000ULL;
@@ -481,9 +500,11 @@ static esp_err_t audio_service_play_mp3(const char *path, uint8_t volume_percent
 
     audio_ret = esp_audio_simple_dec_open(&decoder_config, &decoder);
     if (audio_ret != ESP_AUDIO_ERR_OK) {
+        audio_service_log_heap("mp3_decoder_open_failed");
         ret = ESP_ERR_NOT_SUPPORTED;
         goto cleanup;
     }
+    audio_service_log_heap("mp3_after_decoder_open");
 
     while (true) {
         size_t read_size = fread(input_buffer, 1, AUDIO_SERVICE_DECODER_INPUT_BYTES, file);
@@ -513,6 +534,7 @@ static esp_err_t audio_service_play_mp3(const char *path, uint8_t volume_percent
                 int16_t *new_stereo = realloc(stereo_buffer, frame.needed_size * 2U);
 
                 if ((new_output == NULL) || (new_stereo == NULL)) {
+                    audio_service_log_heap("mp3_buffer_realloc_failed");
                     free(new_output);
                     free(new_stereo);
                     ret = ESP_ERR_NO_MEM;
@@ -521,6 +543,12 @@ static esp_err_t audio_service_play_mp3(const char *path, uint8_t volume_percent
                 output_buffer = new_output;
                 stereo_buffer = new_stereo;
                 output_buffer_size = frame.needed_size;
+                ESP_LOGI(TAG,
+                         "MP3 buffers resized: output=%u stereo=%u total=%u",
+                         (unsigned int)output_buffer_size,
+                         (unsigned int)(output_buffer_size * 2U),
+                         (unsigned int)(AUDIO_SERVICE_DECODER_INPUT_BYTES + output_buffer_size + (output_buffer_size * 2U)));
+                audio_service_log_heap("mp3_after_buffer_resize");
                 continue;
             }
             if ((audio_ret != ESP_AUDIO_ERR_OK) && (audio_ret != ESP_AUDIO_ERR_CONTINUE) &&
@@ -616,6 +644,7 @@ cleanup:
         fclose(file);
     }
     audio_service_finish_output();
+    audio_service_log_heap("mp3_after_cleanup");
 
     ESP_LOGI(TAG, "Playback end: path=%s format=mp3 result=%s", path, esp_err_to_name(ret));
 
@@ -645,7 +674,7 @@ esp_err_t audio_service_play(const char *path,
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (volume_percent == 0) {
+    if (volume_percent > 100) {
         volume_percent = 100;
     }
 

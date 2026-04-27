@@ -87,6 +87,20 @@ static esp_err_t storage_service_init_internal_spiffs(void)
                  (unsigned int)used);
     }
 
+    {
+        struct stat info = {0};
+        if (stat(STORAGE_SERVICE_DEFAULT_AUDIO_PATH, &info) == 0) {
+            ESP_LOGI(TAG,
+                     "Default audio available: path=%s size=%" PRId64,
+                     STORAGE_SERVICE_DEFAULT_AUDIO_PATH,
+                     (int64_t)info.st_size);
+        } else {
+            ESP_LOGW(TAG,
+                     "Default audio missing: path=%s",
+                     STORAGE_SERVICE_DEFAULT_AUDIO_PATH);
+        }
+    }
+
     s_internal_ready = true;
     return ESP_OK;
 }

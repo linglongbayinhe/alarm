@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <inttypes.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,7 @@
 #include "audio_service.h"
 #include "cJSON.h"
 #include "device_cloud_service.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -25,9 +27,10 @@ static const char *PLAYBACK_TASK_BLOB_KEY = "tasks_v1";
 
 #define PLAYBACK_TASK_TASK_STACK_SIZE             8192
 #define PLAYBACK_TASK_TASK_PRIORITY               4
-#define PLAYBACK_TASK_REPORT_TASK_STACK_SIZE      6144
+#define PLAYBACK_TASK_REPORT_TASK_STACK_SIZE      10240
 #define PLAYBACK_TASK_REPORT_TASK_PRIORITY        4
 #define PLAYBACK_TASK_RESPONSE_BYTES              4096
+#define PLAYBACK_TASK_REPORT_REQUEST_BYTES        512
 #define PLAYBACK_TASK_REPORT_RESPONSE_BYTES       1024
 #define PLAYBACK_TASK_HTTP_GRACE_SECONDS          300
 #define PLAYBACK_TASK_KEEP_FILE_SECONDS           (24 * 60 * 60)
@@ -38,6 +41,8 @@ static const char *PLAYBACK_TASK_BLOB_KEY = "tasks_v1";
 #define PLAYBACK_TASK_REPORT_QUEUE_LENGTH         (PLAYBACK_TASK_MAX_COUNT * 2)
 #define PLAYBACK_TASK_REPORT_INITIAL_RETRY_SECS   30
 #define PLAYBACK_TASK_REPORT_MAX_RETRY_SECS       (15 * 60)
+#define PLAYBACK_TASK_REPORT_AFTER_PLAY_DELAY_MS  3000
+#define PLAYBACK_TASK_DEFAULT_VOLUME_PERCENT      50
 
 typedef struct {
     uint32_t magic;
@@ -64,10 +69,35 @@ static TimerHandle_t s_save_timer;
 static bool s_force_sync = true;
 static bool s_state_dirty;
 static uint32_t s_last_config_generation;
+static uint8_t s_current_volume_percent = PLAYBACK_TASK_DEFAULT_VOLUME_PERCENT;
 
 static void playback_task_mark_dirty(bool immediate);
 static void playback_task_flush_state_if_dirty(void);
 static void playback_task_log_next_due(time_t now);
+
+static void playback_task_log_heap(const char *stage)
+{
+    ESP_LOGI(TAG,
+             "Heap %s: free=%u largest=%u",
+             stage,
+             (unsigned int)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+}
+
+static bool playback_task_report_is_after_play(uint8_t task_status)
+{
+    return (task_status == PLAYBACK_TASK_STATUS_FINISHED) ||
+           (task_status == PLAYBACK_TASK_STATUS_FAILED);
+}
+
+static size_t playback_task_blob_size_for_count(size_t task_count)
+{
+    if (task_count > PLAYBACK_TASK_MAX_COUNT) {
+        task_count = PLAYBACK_TASK_MAX_COUNT;
+    }
+
+    return offsetof(playback_task_blob_t, tasks) + (sizeof(playback_task_t) * task_count);
+}
 
 static void playback_task_copy_string(char *destination, size_t destination_size, const char *source)
 {
@@ -110,9 +140,10 @@ static esp_err_t playback_task_save_state_to_nvs(void)
 {
     playback_task_blob_t *blob = NULL;
     nvs_handle_t handle = 0;
+    size_t blob_size = playback_task_blob_size_for_count(s_task_count);
     esp_err_t ret = ESP_OK;
 
-    blob = calloc(1, sizeof(*blob));
+    blob = calloc(1, blob_size);
     if (blob == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -130,7 +161,7 @@ static esp_err_t playback_task_save_state_to_nvs(void)
         return ret;
     }
 
-    ret = nvs_set_blob(handle, PLAYBACK_TASK_BLOB_KEY, blob, sizeof(*blob));
+    ret = nvs_set_blob(handle, PLAYBACK_TASK_BLOB_KEY, blob, blob_size);
     if (ret == ESP_OK) {
         ret = nvs_commit(handle);
     }
@@ -144,11 +175,23 @@ static bool playback_task_remove_expired(time_t now)
 {
     size_t write_index = 0;
     size_t read_index = 0;
+    int64_t stale_due_epoch = (int64_t)now - PLAYBACK_TASK_HTTP_GRACE_SECONDS;
     bool changed = false;
 
     for (read_index = 0; read_index < s_task_count; ++read_index) {
         const playback_task_t *task = &s_tasks[read_index];
         if ((task->expires_at_epoch > 0) && (task->expires_at_epoch < now)) {
+            changed = true;
+            continue;
+        }
+        if ((task->ring_at_epoch > 0) &&
+            (task->ring_at_epoch < stale_due_epoch) &&
+            (task->task_status != PLAYBACK_TASK_STATUS_FINISHED) &&
+            (task->task_status != PLAYBACK_TASK_STATUS_FAILED)) {
+            ESP_LOGI(TAG,
+                     "Dropping stale playback task %s ring_at=%" PRId64,
+                     task->instance_id,
+                     task->ring_at_epoch);
             changed = true;
             continue;
         }
@@ -186,7 +229,8 @@ static void playback_task_load_state(void)
     if (nvs_get_blob(handle, PLAYBACK_TASK_BLOB_KEY, blob, &blob_size) == ESP_OK) {
         if ((blob->magic == 0x50544231U) &&
             (blob->version == 1U) &&
-            (blob->task_count <= PLAYBACK_TASK_MAX_COUNT)) {
+            (blob->task_count <= PLAYBACK_TASK_MAX_COUNT) &&
+            (blob_size >= playback_task_blob_size_for_count(blob->task_count))) {
             s_task_count = blob->task_count;
             if (s_task_count > 0) {
                 memcpy(s_tasks, blob->tasks, s_task_count * sizeof(playback_task_t));
@@ -323,6 +367,58 @@ static const cJSON *playback_task_find_array(const cJSON *root)
     return NULL;
 }
 
+static bool playback_task_parse_target_volume(const cJSON *item, uint8_t *volume_out)
+{
+    int value = 0;
+
+    if ((item == NULL) || (volume_out == NULL) || !cJSON_IsNumber(item)) {
+        return false;
+    }
+
+    value = item->valueint;
+    if (value < 0) {
+        value = 0;
+    } else if (value > 100) {
+        value = 100;
+    }
+
+    *volume_out = (uint8_t)value;
+    return true;
+}
+
+static void playback_task_update_volume_from_response(const cJSON *root, const cJSON *task_array)
+{
+    uint8_t parsed_volume = 0;
+    const cJSON *target_volume = NULL;
+    int index = 0;
+
+    if (root == NULL) {
+        return;
+    }
+
+    target_volume = cJSON_GetObjectItemCaseSensitive(root, "targetVolume");
+    if (playback_task_parse_target_volume(target_volume, &parsed_volume)) {
+        s_current_volume_percent = parsed_volume;
+        ESP_LOGI(TAG, "Alarm volume set to %u%% from targetVolume", (unsigned int)s_current_volume_percent);
+        return;
+    }
+
+    if (!cJSON_IsArray(task_array)) {
+        return;
+    }
+
+    for (index = 0; index < cJSON_GetArraySize(task_array); ++index) {
+        const cJSON *task_object = cJSON_GetArrayItem(task_array, index);
+        target_volume = cJSON_GetObjectItemCaseSensitive(task_object, "targetVolume");
+        if (playback_task_parse_target_volume(target_volume, &parsed_volume)) {
+            s_current_volume_percent = parsed_volume;
+            ESP_LOGI(TAG, "Alarm volume set to %u%% from task targetVolume",
+                     (unsigned int)s_current_volume_percent);
+            return;
+        }
+    }
+}
+
 static bool playback_task_should_keep_remote_task(const playback_task_t *task,
                                                   time_t now,
                                                   uint32_t preload_window_hours)
@@ -346,18 +442,35 @@ static bool playback_task_should_keep_remote_task(const playback_task_t *task,
 
 static void playback_task_merge_cached_fields(playback_task_t *new_task, const playback_task_t *existing_task)
 {
+    bool same_ring_at = false;
+    bool same_audio_url = false;
+
     if ((new_task == NULL) || (existing_task == NULL)) {
         return;
     }
 
-    playback_task_copy_string(new_task->local_audio_path,
-                              sizeof(new_task->local_audio_path),
-                              existing_task->local_audio_path);
-    new_task->audio_cached = existing_task->audio_cached;
-    new_task->audio_status = existing_task->audio_status;
-    new_task->task_status = existing_task->task_status;
-    new_task->last_reported_status = existing_task->last_reported_status;
-    new_task->retry_count = existing_task->retry_count;
+    same_ring_at = (new_task->ring_at_epoch == existing_task->ring_at_epoch);
+    same_audio_url = (strcmp(new_task->audio_url, existing_task->audio_url) == 0);
+
+    if (!same_ring_at) {
+        ESP_LOGI(TAG,
+                 "Remote playback task reused instanceId=%s with changed ringAt; treating as new local schedule",
+                 new_task->instance_id);
+    }
+
+    if (same_audio_url) {
+        playback_task_copy_string(new_task->local_audio_path,
+                                  sizeof(new_task->local_audio_path),
+                                  existing_task->local_audio_path);
+        new_task->audio_cached = existing_task->audio_cached;
+        new_task->audio_status = existing_task->audio_status;
+    }
+
+    if (same_ring_at) {
+        new_task->task_status = existing_task->task_status;
+        new_task->last_reported_status = existing_task->last_reported_status;
+        new_task->retry_count = existing_task->retry_count;
+    }
 
     if ((new_task->audio_cached != 0U) &&
         !audio_cache_service_file_exists(new_task->local_audio_path)) {
@@ -612,16 +725,19 @@ static esp_err_t playback_task_build_report_json(const device_cloud_config_t *co
 static void playback_task_report_task(void *arg)
 {
     playback_report_event_t event = {0};
-    char request_body[512] = {0};
+    char *request_body = NULL;
     char *response_buffer = NULL;
     device_cloud_session_t session = {0};
     device_cloud_http_response_t response = {0};
 
     (void)arg;
 
+    request_body = calloc(1, PLAYBACK_TASK_REPORT_REQUEST_BYTES);
     response_buffer = calloc(1, PLAYBACK_TASK_REPORT_RESPONSE_BYTES);
-    if (response_buffer == NULL) {
+    if ((request_body == NULL) || (response_buffer == NULL)) {
         ESP_LOGE(TAG, "Failed to allocate playback report buffer");
+        free(request_body);
+        free(response_buffer);
         vTaskDelete(NULL);
         return;
     }
@@ -638,6 +754,15 @@ static void playback_task_report_task(void *arg)
             continue;
         }
 
+        if ((event.retry_count == 0U) && playback_task_report_is_after_play(event.task_status)) {
+            ESP_LOGI(TAG,
+                     "Delaying playback status report by %u ms for %s status=%s",
+                     (unsigned int)PLAYBACK_TASK_REPORT_AFTER_PLAY_DELAY_MS,
+                     event.instance_id,
+                     playback_task_status_to_string((playback_task_status_t)event.task_status));
+            vTaskDelay(pdMS_TO_TICKS(PLAYBACK_TASK_REPORT_AFTER_PLAY_DELAY_MS));
+        }
+
         if (!playback_task_is_connected()) {
             ret = ESP_ERR_INVALID_STATE;
         } else {
@@ -646,9 +771,13 @@ static void playback_task_report_task(void *arg)
                 ret = ESP_ERR_INVALID_STATE;
             }
             if (ret == ESP_OK) {
-                ret = playback_task_build_report_json(&config, &event, request_body, sizeof(request_body));
+                ret = playback_task_build_report_json(&config,
+                                                      &event,
+                                                      request_body,
+                                                      PLAYBACK_TASK_REPORT_REQUEST_BYTES);
             }
             if (ret == ESP_OK) {
+                playback_task_log_heap("before_report_status");
                 ret = device_cloud_session_post_json(&session,
                                                      config.report_status_url,
                                                      request_body,
@@ -660,8 +789,13 @@ static void playback_task_report_task(void *arg)
             ESP_LOGI(TAG, "Reported %s for %s",
                      playback_task_status_to_string((playback_task_status_t)event.task_status),
                      event.instance_id);
+            playback_task_log_heap("after_report_status");
             continue;
         }
+
+        device_cloud_session_deinit(&session);
+        device_cloud_session_init(&session, response_buffer, PLAYBACK_TASK_REPORT_RESPONSE_BYTES);
+        playback_task_log_heap("after_report_session_reset");
 
         event.retry_count++;
         {
@@ -739,6 +873,7 @@ static esp_err_t playback_task_sync_from_cloud(device_cloud_session_t *session,
         ret = ESP_ERR_INVALID_RESPONSE;
         goto cleanup;
     }
+    playback_task_update_volume_from_response(root, task_array);
 
     for (index = 0; index < (size_t)cJSON_GetArraySize(task_array) && new_task_count < new_task_capacity; ++index) {
         playback_task_t parsed_task = {0};
@@ -832,7 +967,9 @@ static void playback_task_download_missing_audio(void)
                 task->task_status = PLAYBACK_TASK_STATUS_PENDING;
             }
             changed = true;
-            playback_task_enqueue_report_status(task, PLAYBACK_TASK_STATUS_FAILED);
+            ESP_LOGW(TAG,
+                     "Audio cache failed locally for %s; cloud failed report is disabled",
+                     task->instance_id);
         }
     }
 
@@ -855,30 +992,49 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
     if ((task->audio_cached != 0U) && (task->local_audio_path[0] != '\0') &&
         audio_cache_service_file_exists(task->local_audio_path)) {
         play_path = task->local_audio_path;
+        ESP_LOGI(TAG,
+                 "Playback source: cached audio path=%s volume=%u",
+                 play_path,
+                 (unsigned int)s_current_volume_percent);
     } else if (playback_task_allows_fallback(task) && storage_service_default_audio_exists()) {
         play_path = storage_service_get_default_audio_path();
         format = AUDIO_SERVICE_FORMAT_AUTO;
+        ESP_LOGI(TAG,
+                 "Playback source: default audio path=%s fallbackMode=%s volume=%u",
+                 play_path,
+                 task->fallback_mode,
+                 (unsigned int)s_current_volume_percent);
     } else {
+        ESP_LOGW(TAG,
+                 "No playable audio for %s: cached=%u localPath=%s localExists=%d fallbackMode=%s fallbackAllowed=%d defaultPath=%s defaultExists=%d",
+                 task->instance_id,
+                 (unsigned int)task->audio_cached,
+                 task->local_audio_path,
+                 ((task->local_audio_path[0] != '\0') && audio_cache_service_file_exists(task->local_audio_path)) ? 1 : 0,
+                 task->fallback_mode,
+                 playback_task_allows_fallback(task) ? 1 : 0,
+                 storage_service_get_default_audio_path(),
+                 storage_service_default_audio_exists() ? 1 : 0);
         task->task_status = PLAYBACK_TASK_STATUS_FAILED;
         task->audio_status = PLAYBACK_AUDIO_STATUS_FAILED;
         task->expires_at_epoch = time(NULL) + PLAYBACK_TASK_KEEP_FILE_SECONDS;
         playback_task_mark_dirty(true);
-        playback_task_enqueue_report_status(task, PLAYBACK_TASK_STATUS_FAILED);
+        ESP_LOGW(TAG, "Playback failed locally for %s: no playable audio (Failed: with no audio)", task->instance_id);
         return ESP_ERR_NOT_FOUND;
     }
 
     task->task_status = PLAYBACK_TASK_STATUS_PLAYING;
-    playback_task_enqueue_report_status(task, PLAYBACK_TASK_STATUS_PLAYING);
 
-    ret = audio_service_play(play_path, format, 100, 0);
+    ret = audio_service_play(play_path, format, s_current_volume_percent, 0);
     if ((ret != ESP_OK) &&
         (format == AUDIO_SERVICE_FORMAT_AUTO) &&
         playback_task_allows_fallback(task) &&
-        storage_service_default_audio_exists()) {
+        storage_service_default_audio_exists() &&
+        (strcmp(play_path, storage_service_get_default_audio_path()) != 0)) {
         task->audio_status = PLAYBACK_AUDIO_STATUS_FAILED;
         ret = audio_service_play(storage_service_get_default_audio_path(),
                                  AUDIO_SERVICE_FORMAT_AUTO,
-                                 100,
+                                 s_current_volume_percent,
                                  0);
     }
 
@@ -891,7 +1047,14 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
 
     task->expires_at_epoch = time(NULL) + PLAYBACK_TASK_KEEP_FILE_SECONDS;
     playback_task_mark_dirty(true);
-    playback_task_enqueue_report_status(task, (playback_task_status_t)task->task_status);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Playback finished locally for %s (Success)", task->instance_id);
+    } else {
+        ESP_LOGW(TAG,
+                 "Playback failed locally for %s: %s (Failed: play failed)",
+                 task->instance_id,
+                 esp_err_to_name(ret));
+    }
 
     return ret;
 }
@@ -1025,6 +1188,7 @@ static void playback_task_service_task(void *arg)
     device_cloud_http_response_t response = {0};
     device_cloud_session_t sync_session = {0};
     time_t next_sync_epoch = 0;
+    bool initial_sync_attempted = false;
 
     (void)arg;
 
@@ -1043,6 +1207,7 @@ static void playback_task_service_task(void *arg)
     while (true) {
         device_cloud_config_t config = {0};
         uint32_t notify_bits = 0;
+        esp_err_t config_ret = ESP_OK;
         time_t now = 0;
 
         xEventGroupWaitBits(s_connected_event_group,
@@ -1054,6 +1219,7 @@ static void playback_task_service_task(void *arg)
         if (device_cloud_service_get_generation() != s_last_config_generation) {
             s_last_config_generation = device_cloud_service_get_generation();
             s_force_sync = true;
+            initial_sync_attempted = false;
         }
 
         if (!time_service_has_valid_time()) {
@@ -1069,14 +1235,12 @@ static void playback_task_service_task(void *arg)
         }
 
         now = time(NULL);
-        if (playback_task_process_due_tasks(now)) {
-            s_force_sync = true;
-        }
         if (playback_task_remove_expired(now)) {
             playback_task_mark_dirty(false);
         }
 
-        if ((device_cloud_service_get_config(&config) == ESP_OK) &&
+        config_ret = device_cloud_service_get_config(&config);
+        if ((config_ret == ESP_OK) &&
             playback_task_is_connected() &&
             (s_force_sync || (next_sync_epoch == 0) || (now >= next_sync_epoch))) {
             playback_task_t *scratch_tasks = calloc(PLAYBACK_TASK_MAX_COUNT, sizeof(*scratch_tasks));
@@ -1092,9 +1256,19 @@ static void playback_task_service_task(void *arg)
                 }
                 free(scratch_tasks);
             }
+            initial_sync_attempted = true;
             now = time(NULL);
             next_sync_epoch = now + (time_t)(config.task_poll_seconds > 0U ? config.task_poll_seconds : (5U * 60U));
             s_force_sync = false;
+        } else if (!initial_sync_attempted && (config_ret != ESP_OK)) {
+            ESP_LOGW(TAG,
+                     "Skipping initial cloud sync because config is unavailable: %s",
+                     esp_err_to_name(config_ret));
+            initial_sync_attempted = true;
+        }
+
+        if (initial_sync_attempted && playback_task_process_due_tasks(now)) {
+            ESP_LOGI(TAG, "Playback completed locally; next cloud sync remains scheduled");
         }
 
         playback_task_flush_state_if_dirty();
