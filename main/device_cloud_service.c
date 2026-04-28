@@ -16,9 +16,9 @@ static const char *TAG = "DEVICE_CLOUD";
 static const char *DEVICE_CLOUD_NAMESPACE = "dev_cloud";
 static const char *DEVICE_CLOUD_CONFIG_KEY = "config_v1";
 
-#define DEVICE_CLOUD_DEFAULT_DISPLAY_URL "https://fc-mp-569ac274-a245-482f-994d-e065e5e73b0b.next.bspapp.com/device-service/getDeviceDisplayState"
-#define DEVICE_CLOUD_DEFAULT_PULL_URL    "https://fc-mp-569ac274-a245-482f-994d-e065e5e73b0b.next.bspapp.com/device-service/pullPlaybackTasks"
-#define DEVICE_CLOUD_DEFAULT_REPORT_URL  "https://fc-mp-569ac274-a245-482f-994d-e065e5e73b0b.next.bspapp.com/device-service/reportPlaybackTaskStatus"
+#define DEVICE_CLOUD_DEFAULT_WEATHER_URL "https://alarm.yoyospace.cc/device-service/getCurrentWeather"
+#define DEVICE_CLOUD_DEFAULT_PULL_URL    "https://alarm.yoyospace.cc/device-service/pullPlaybackTasks"
+#define DEVICE_CLOUD_DEFAULT_REPORT_URL  "https://alarm.yoyospace.cc/device-service/reportPlaybackTaskStatus"
 #define DEVICE_CLOUD_DEFAULT_CLIENT_ID   "client_1776770443964_jmxlxc"
 #define DEVICE_CLOUD_DEFAULT_DEVICE_ID   "dev_demo_001"
 #define DEVICE_CLOUD_DEFAULT_PRELOAD_HOURS 48
@@ -54,12 +54,23 @@ static bool device_cloud_strings_equal(const char *left, const char *right)
     return strcmp(left, right) == 0;
 }
 
+static bool device_cloud_config_has_persisted_urls(const device_cloud_config_t *config)
+{
+    if (config == NULL) {
+        return false;
+    }
+
+    return !device_cloud_string_is_empty(config->display_state_url) ||
+           !device_cloud_string_is_empty(config->pull_tasks_url) ||
+           !device_cloud_string_is_empty(config->report_status_url);
+}
+
 static void device_cloud_init_defaults(device_cloud_config_t *config)
 {
     memset(config, 0, sizeof(*config));
     device_cloud_copy_string(config->display_state_url,
                              sizeof(config->display_state_url),
-                             DEVICE_CLOUD_DEFAULT_DISPLAY_URL);
+                             DEVICE_CLOUD_DEFAULT_WEATHER_URL);
     device_cloud_copy_string(config->pull_tasks_url,
                              sizeof(config->pull_tasks_url),
                              DEVICE_CLOUD_DEFAULT_PULL_URL);
@@ -111,7 +122,7 @@ static void device_cloud_apply_defaults(device_cloud_config_t *config)
     if (device_cloud_string_is_empty(config->display_state_url)) {
         device_cloud_copy_string(config->display_state_url,
                                  sizeof(config->display_state_url),
-                                 DEVICE_CLOUD_DEFAULT_DISPLAY_URL);
+                                 DEVICE_CLOUD_DEFAULT_WEATHER_URL);
     }
     if (device_cloud_string_is_empty(config->pull_tasks_url)) {
         device_cloud_derive_url(config->display_state_url,
@@ -150,11 +161,22 @@ static void device_cloud_apply_defaults(device_cloud_config_t *config)
     if ((config->task_poll_seconds == 0U) || (config->task_poll_seconds == 30U)) {
         config->task_poll_seconds = DEVICE_CLOUD_DEFAULT_TASK_POLL_SECONDS;
     }
+
+    device_cloud_copy_string(config->display_state_url,
+                             sizeof(config->display_state_url),
+                             DEVICE_CLOUD_DEFAULT_WEATHER_URL);
+    device_cloud_copy_string(config->pull_tasks_url,
+                             sizeof(config->pull_tasks_url),
+                             DEVICE_CLOUD_DEFAULT_PULL_URL);
+    device_cloud_copy_string(config->report_status_url,
+                             sizeof(config->report_status_url),
+                             DEVICE_CLOUD_DEFAULT_REPORT_URL);
 }
 
 static esp_err_t device_cloud_save_config(const device_cloud_config_t *config)
 {
     nvs_handle_t handle = 0;
+    device_cloud_config_t persisted_config;
     esp_err_t ret = ESP_OK;
 
     ret = nvs_open(DEVICE_CLOUD_NAMESPACE, NVS_READWRITE, &handle);
@@ -162,7 +184,12 @@ static esp_err_t device_cloud_save_config(const device_cloud_config_t *config)
         return ret;
     }
 
-    ret = nvs_set_blob(handle, DEVICE_CLOUD_CONFIG_KEY, config, sizeof(*config));
+    persisted_config = *config;
+    persisted_config.display_state_url[0] = '\0';
+    persisted_config.pull_tasks_url[0] = '\0';
+    persisted_config.report_status_url[0] = '\0';
+
+    ret = nvs_set_blob(handle, DEVICE_CLOUD_CONFIG_KEY, &persisted_config, sizeof(persisted_config));
     if (ret == ESP_OK) {
         ret = nvs_commit(handle);
     }
@@ -356,6 +383,7 @@ esp_err_t device_cloud_service_init(void)
     device_cloud_config_t loaded_config;
     nvs_handle_t handle = 0;
     size_t required_size = sizeof(loaded_config);
+    bool should_save_config = false;
     esp_err_t ret = ESP_OK;
 
     if (s_initialized) {
@@ -369,10 +397,9 @@ esp_err_t device_cloud_service_init(void)
         ret = nvs_get_blob(handle, DEVICE_CLOUD_CONFIG_KEY, &loaded_config, &required_size);
         if ((ret != ESP_OK) || (required_size != sizeof(loaded_config))) {
             device_cloud_init_defaults(&loaded_config);
-            ret = device_cloud_save_config(&loaded_config);
-            if (ret != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to persist default config: %s", esp_err_to_name(ret));
-            }
+            should_save_config = true;
+        } else if (device_cloud_config_has_persisted_urls(&loaded_config)) {
+            should_save_config = true;
         }
         nvs_close(handle);
     } else {
@@ -380,10 +407,22 @@ esp_err_t device_cloud_service_init(void)
     }
 
     device_cloud_apply_defaults(&loaded_config);
+    if (should_save_config) {
+        ret = device_cloud_save_config(&loaded_config);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to persist cloud config: %s", esp_err_to_name(ret));
+        }
+    }
+
     device_cloud_store_config(&loaded_config);
     s_initialized = true;
 
     ESP_LOGI(TAG, "Cloud config initialized for deviceId=%s", loaded_config.device_id);
+    ESP_LOGI(TAG,
+             "Cloud URLs: weather=%s pull=%s report=%s",
+             loaded_config.display_state_url,
+             loaded_config.pull_tasks_url,
+             loaded_config.report_status_url);
     return ESP_OK;
 }
 

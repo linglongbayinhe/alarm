@@ -1,6 +1,6 @@
 idf_component_register(SRCS "main.c"
-                            "audio_cache_service.c"
-                            "audio_service.c"
+                            "audio/audio_cache_service.c"
+                            "audio/audio_service.c"
                             "blufi_security.c"
                             "blufi_init.c"
                             "device_cloud_service.c"
@@ -49,6 +49,7 @@ idf_component_register(SRCS "main.c"
                                   lvgl
                                   esp_lvgl_port
                     INCLUDE_DIRS "."
+                                 "audio"
                                  "ui"
                                  "display"
                                  "status"

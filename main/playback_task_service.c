@@ -25,7 +25,7 @@ static const char *TAG = "PLAYBACK_TASK";
 static const char *PLAYBACK_TASK_NAMESPACE = "playback";
 static const char *PLAYBACK_TASK_BLOB_KEY = "tasks_v1";
 
-#define PLAYBACK_TASK_TASK_STACK_SIZE             8192
+#define PLAYBACK_TASK_TASK_STACK_SIZE             14336
 #define PLAYBACK_TASK_TASK_PRIORITY               4
 #define PLAYBACK_TASK_REPORT_TASK_STACK_SIZE      10240
 #define PLAYBACK_TASK_REPORT_TASK_PRIORITY        4
