@@ -11,10 +11,10 @@
 #include "device_cloud_service.h"
 #include "esp_log.h"
 #include "freertos/task.h"
+#include "network_task_service.h"
 #include "time_service.h"
 
-#define WEATHER_DEVICE_RESPONSE_BYTES              1536
-#define WEATHER_DEVICE_TASK_STACK_SIZE             8192
+#define WEATHER_DEVICE_TASK_STACK_SIZE             4096
 #define WEATHER_DEVICE_TASK_PRIORITY               4
 #define WEATHER_DEVICE_TIME_WAIT_MS                5000
 #define WEATHER_DEVICE_TIME_LOG_MS                 30000
@@ -253,53 +253,39 @@ cleanup:
     return ret;
 }
 
-static esp_err_t weather_device_fetch_once(device_cloud_session_t *session,
-                                           device_cloud_http_response_t *response,
-                                           char *request_body,
-                                           size_t request_body_size)
+static esp_err_t weather_device_apply_response(const char *json)
 {
-    device_cloud_config_t cloud_config = {0};
     esp_err_t ret = ESP_OK;
     weather_snapshot_t snapshot = {0};
 
-    if ((session == NULL) || (response == NULL) || (request_body == NULL) || (request_body_size == 0)) {
+    if (json == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    ret = device_cloud_service_get_config(&cloud_config);
-    if (ret != ESP_OK) {
-        return ret;
-    }
+    ESP_LOGI(TAG, "Raw JSON: %s", json);
 
-    ret = device_cloud_service_build_device_request_json(request_body, request_body_size);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    ESP_LOGI(TAG, "POST %s", cloud_config.display_state_url);
-    ret = device_cloud_session_post_json(session, cloud_config.display_state_url, request_body, response);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG,
-                 "Device display request failed: status=%d body=%s",
-                 response->status_code,
-                 response->buffer == NULL ? "" : response->buffer);
-        return ret;
-    }
-
-    if (response->truncated) {
-        ESP_LOGW(TAG, "Device service response truncated to %u bytes",
-                 (unsigned int)(response->buffer_size - 1));
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    ESP_LOGI(TAG, "Raw JSON: %s", response->buffer == NULL ? "" : response->buffer);
-
-    ret = weather_device_parse_response(response->buffer, &snapshot);
+    ret = weather_device_parse_response(json, &snapshot);
     if (ret == ESP_OK) {
         weather_device_publish_snapshot(&snapshot, true);
     }
 
     return ret;
+}
+
+static void weather_device_network_result(esp_err_t ret, const char *json, size_t json_len, void *ctx)
+{
+    (void)json_len;
+    (void)ctx;
+
+    if (ret == ESP_OK) {
+        ret = weather_device_apply_response(json);
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Weather refresh failed: %s", esp_err_to_name(ret));
+        if (!weather_device_has_successful_snapshot()) {
+            weather_device_publish_simple_state(WEATHER_DATA_STATE_ERROR);
+        }
+    }
 }
 
 static uint32_t weather_device_next_retry_seconds(uint32_t failure_count,
@@ -352,27 +338,12 @@ static TickType_t weather_device_wait_for_time_or_refresh(bool *refresh_requeste
 
 static void weather_device_provider_task(void *arg)
 {
-    char request_body[256] = {0};
-    char *response_buffer = NULL;
-    device_cloud_http_response_t response = {0};
-    device_cloud_session_t session = {0};
     uint32_t failure_count = 0;
     bool refresh_requested = false;
     bool initial_delay_scheduled = false;
     time_t next_refresh_epoch = 0;
 
     (void)arg;
-
-    response_buffer = calloc(1, WEATHER_DEVICE_RESPONSE_BYTES);
-    if (response_buffer == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate weather response buffer");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    response.buffer = response_buffer;
-    response.buffer_size = WEATHER_DEVICE_RESPONSE_BYTES;
-    device_cloud_session_init(&session, response_buffer, WEATHER_DEVICE_RESPONSE_BYTES);
 
     while (true) {
         device_cloud_config_t config = {0};
@@ -412,15 +383,8 @@ static void weather_device_provider_task(void *arg)
                      (unsigned int)WEATHER_DEVICE_INITIAL_DELAY_SECONDS);
         }
         if (refresh_requested || (next_refresh_epoch == 0) || (now >= next_refresh_epoch)) {
-            if (weather_device_fetch_once(&session, &response, request_body, sizeof(request_body)) == ESP_OK) {
-                failure_count = 0;
-            } else {
-                ++failure_count;
-                if (!weather_device_has_successful_snapshot()) {
-                    weather_device_publish_simple_state(WEATHER_DATA_STATE_ERROR);
-                }
-            }
-
+            network_task_service_request_weather_refresh();
+            failure_count = 0;
             next_refresh_epoch = time(NULL) + (time_t)weather_device_next_retry_seconds(failure_count, &config);
             refresh_requested = false;
         }
@@ -468,6 +432,7 @@ esp_err_t weather_device_service_provider_start(EventGroupHandle_t connected_eve
     s_connected_bit = connected_bit;
     s_last_cloud_generation = device_cloud_service_get_generation();
     weather_device_publish_simple_state(WEATHER_DATA_STATE_LOADING);
+    network_task_service_register_weather_handler(weather_device_network_result, NULL);
 
     task_created = xTaskCreate(weather_device_provider_task,
                                "weather_device",

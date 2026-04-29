@@ -8,7 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 
-#define PLAYBACK_TASK_MAX_COUNT 24
+#define PLAYBACK_TASK_MAX_COUNT 12
 #define PLAYBACK_TASK_ID_SIZE 48
 #define PLAYBACK_TASK_TITLE_SIZE 64
 #define PLAYBACK_TASK_AUDIO_URL_SIZE 256
@@ -21,7 +21,6 @@ typedef enum {
     PLAYBACK_TASK_STATUS_PLAYING = 2,
     PLAYBACK_TASK_STATUS_FINISHED = 3,
     PLAYBACK_TASK_STATUS_FAILED = 4,
-    PLAYBACK_TASK_STATUS_REPORTED = 255,
 } playback_task_status_t;
 
 typedef enum {
@@ -42,8 +41,6 @@ typedef struct {
     uint8_t audio_status;
     char local_audio_path[PLAYBACK_TASK_LOCAL_PATH_SIZE];
     uint8_t audio_cached;
-    uint8_t last_reported_status;
-    uint8_t retry_count;
     int64_t expires_at_epoch;
 } playback_task_t;
 

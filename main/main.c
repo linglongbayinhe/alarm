@@ -37,6 +37,7 @@
 #include "audio_service.h"
 #include "device_cloud_service.h"
 #include "display_service.h"
+#include "network_task_service.h"
 #include "playback_task_service.h"
 #include "rtc_service.h"
 #include "status_presenter.h"
@@ -282,7 +283,7 @@ static esp_err_t example_start_runtime_services(void)
     }
 #endif
 
-    ret = weather_device_service_provider_start(wifi_event_group, CONNECTED_BIT);
+    ret = network_task_service_start(wifi_event_group, CONNECTED_BIT);
     if (ret != ESP_OK) {
         return ret;
     }
@@ -293,6 +294,11 @@ static esp_err_t example_start_runtime_services(void)
         return ret;
     }
     example_log_internal_heap("after_playback_start");
+
+    ret = weather_device_service_provider_start(wifi_event_group, CONNECTED_BIT);
+    if (ret != ESP_OK) {
+        return ret;
+    }
 
     s_runtime_services_started = true;
     return ESP_OK;
@@ -913,6 +919,7 @@ void app_main(void)
     ESP_ERROR_CHECK( ret );
 
     ESP_ERROR_CHECK(device_cloud_service_init());
+    ESP_ERROR_CHECK(network_task_service_init());
     ESP_ERROR_CHECK(storage_service_init());
     ESP_ERROR_CHECK(audio_cache_service_init());
     ESP_ERROR_CHECK(audio_service_init());
