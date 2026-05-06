@@ -27,7 +27,7 @@ static const char *EXT_FLASH_PARTITION_LABEL = "extcache";
 #define STORAGE_SERVICE_EXT_FLASH_MISO GPIO_NUM_25
 #define STORAGE_SERVICE_EXT_FLASH_SCLK GPIO_NUM_33
 #define STORAGE_SERVICE_EXT_FLASH_CS   GPIO_NUM_27
-#define STORAGE_SERVICE_EXT_FLASH_FREQ_MHZ 10
+#define STORAGE_SERVICE_EXT_FLASH_FREQ_MHZ 2
 #endif
 
 static bool s_internal_ready;
@@ -119,7 +119,7 @@ static esp_err_t storage_service_init_external_flash(void)
         .host_id = STORAGE_SERVICE_EXT_FLASH_HOST,
         .cs_id = 0,
         .cs_io_num = STORAGE_SERVICE_EXT_FLASH_CS,
-        .io_mode = SPI_FLASH_DIO,
+        .io_mode = SPI_FLASH_SLOWRD,
         .freq_mhz = STORAGE_SERVICE_EXT_FLASH_FREQ_MHZ,
     };
     esp_vfs_fat_mount_config_t mount_config = {

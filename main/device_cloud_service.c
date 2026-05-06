@@ -6,11 +6,14 @@
 #include <string.h>
 
 #include "cJSON.h"
-#include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "nvs.h"
+
+#if !defined(CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY) || !CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY
+#include "esp_crt_bundle.h"
+#endif
 
 static const char *TAG = "DEVICE_CLOUD";
 static const char *DEVICE_CLOUD_NAMESPACE = "dev_cloud";

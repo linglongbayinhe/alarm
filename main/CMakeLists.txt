@@ -44,6 +44,7 @@ idf_component_register(SRCS "network_task_service.c" "main.c"
                                   spi_flash
                                   esp_partition
                                   lwip
+                                  esp_wifi
                                   esp_http_client
                                   esp-tls
                                   cjson

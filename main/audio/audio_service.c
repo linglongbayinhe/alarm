@@ -9,9 +9,8 @@
 
 #include "freertos/FreeRTOS.h"
 #include "driver/i2s_std.h"
-#include "esp_audio_dec_default.h"
 #include "esp_audio_simple_dec.h"
-#include "esp_audio_simple_dec_default.h"
+#include "esp_mp3_dec.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
@@ -654,8 +653,7 @@ cleanup:
 esp_err_t audio_service_init(void)
 {
     if (!s_decoder_registered) {
-        esp_audio_dec_register_default();
-        esp_audio_simple_dec_register_default();
+        esp_mp3_dec_register();
         s_decoder_registered = true;
     }
     s_initialized = true;

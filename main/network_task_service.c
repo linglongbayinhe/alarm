@@ -14,25 +14,25 @@
 
 static const char *TAG = "NETWORK_TASK";
 
-#define NETWORK_TASK_STACK_SIZE              14336
+#define NETWORK_TASK_STACK_SIZE              12288
 #define NETWORK_TASK_PRIORITY                4
 #define NETWORK_TASK_RESPONSE_BYTES          4096
 #define NETWORK_TASK_REPORT_BYTES            512
-#define NETWORK_TASK_MAX_AUDIO_JOBS          8
 #define NETWORK_TASK_MAX_REPORT_JOBS         8
-#define NETWORK_TASK_HEAP_FREE_MIN           50000
-#define NETWORK_TASK_HEAP_LARGEST_MIN        28000
-#define NETWORK_TASK_HEAP_STABLE_COUNT       2
-#define NETWORK_TASK_HEAP_CHECK_INTERVAL_MS  2000
-#define NETWORK_TASK_POST_PLAY_MAX_WAIT_MS   90000
+#define NETWORK_TASK_MAX_AUDIO_JOBS          12
+#define NETWORK_TASK_HTTPS_HEAP_FREE_MIN     30000
+#define NETWORK_TASK_HTTPS_HEAP_LARGEST_MIN  15000
 #define NETWORK_TASK_NOTIFY_WORK             BIT0
 #define NETWORK_TASK_NOTIFY_RESET_SESSION    BIT1
 
-typedef struct {
-    bool in_use;
-    char instance_id[48];
-    char audio_url[256];
-} network_audio_job_t;
+typedef enum {
+    NETWORK_TASK_JOB_NONE = 0,
+    NETWORK_TASK_JOB_ALARM_REPORT,
+    NETWORK_TASK_JOB_ALARM_PULL,
+    NETWORK_TASK_JOB_WEATHER_REFRESH,
+    NETWORK_TASK_JOB_AUDIO_DOWNLOAD,
+    NETWORK_TASK_JOB_LOW_SYNC,
+} network_task_job_type_t;
 
 typedef struct {
     bool in_use;
@@ -41,22 +41,47 @@ typedef struct {
     char audio_status[24];
 } network_report_job_t;
 
+typedef struct {
+    bool in_use;
+    char audio_url[AUDIO_CACHE_URL_SIZE];
+    int64_t ring_at_epoch;
+} network_audio_download_job_t;
+
+typedef struct {
+    network_task_job_type_t type;
+    union {
+        network_report_job_t report;
+        network_task_playback_reason_t playback_reason;
+        network_task_weather_reason_t weather_reason;
+        network_audio_download_job_t audio_download;
+    } data;
+} network_task_job_t;
+
 static SemaphoreHandle_t s_lock;
 static EventGroupHandle_t s_connected_event_group;
 static EventBits_t s_connected_bit;
 static TaskHandle_t s_task_handle;
 static bool s_initialized;
-static bool s_pending_post_playback_pull;
-static bool s_pending_playback_pull;
-static bool s_pending_weather_refresh;
-static network_audio_job_t s_audio_jobs[NETWORK_TASK_MAX_AUDIO_JOBS];
+static network_task_playback_reason_t s_pending_playback_reason;
+static network_task_weather_reason_t s_pending_weather_reason;
+static network_audio_download_job_t s_audio_download_jobs[NETWORK_TASK_MAX_AUDIO_JOBS];
+static bool s_audio_cache_cleanup_pending;
+static bool s_audio_cache_batch_active;
+static esp_err_t s_audio_cache_batch_ret = ESP_OK;
+static char s_audio_cache_protected_path[AUDIO_CACHE_PATH_MAX];
 static network_report_job_t s_report_jobs[NETWORK_TASK_MAX_REPORT_JOBS];
 static network_task_json_result_cb_t s_playback_handler;
 static void *s_playback_handler_ctx;
 static network_task_json_result_cb_t s_weather_handler;
 static void *s_weather_handler_ctx;
-static network_task_audio_result_cb_t s_audio_handler;
-static void *s_audio_handler_ctx;
+static network_task_audio_cache_result_cb_t s_audio_cache_handler;
+static void *s_audio_cache_handler_ctx;
+static network_task_audio_cache_done_cb_t s_audio_cache_done_handler;
+static void *s_audio_cache_done_handler_ctx;
+static network_task_startup_pull_done_cb_t s_startup_pull_done_handler;
+static void *s_startup_pull_done_handler_ctx;
+static network_task_startup_weather_done_cb_t s_startup_weather_done_handler;
+static void *s_startup_weather_done_handler_ctx;
 
 static void network_task_copy_string(char *destination, size_t destination_size, const char *source)
 {
@@ -97,119 +122,141 @@ static void network_task_unlock(void)
     }
 }
 
-static bool network_task_wait_for_post_playback_heap(void)
+static bool network_task_https_heap_ready(const char *job_name)
 {
-    uint32_t stable_count = 0;
-    uint32_t waited_ms = 0;
+    uint32_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    uint32_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
 
-    while (waited_ms <= NETWORK_TASK_POST_PLAY_MAX_WAIT_MS) {
-        uint32_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-        uint32_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-
-        if ((free_heap >= NETWORK_TASK_HEAP_FREE_MIN) &&
-            (largest >= NETWORK_TASK_HEAP_LARGEST_MIN)) {
-            ++stable_count;
-            if (stable_count >= NETWORK_TASK_HEAP_STABLE_COUNT) {
-                network_task_log_heap("post_playback_ready");
-                return true;
-            }
-        } else {
-            stable_count = 0;
-            ESP_LOGI(TAG,
-                     "Waiting for post playback heap: free=%u/%u largest=%u/%u",
-                     (unsigned int)free_heap,
-                     (unsigned int)NETWORK_TASK_HEAP_FREE_MIN,
-                     (unsigned int)largest,
-                     (unsigned int)NETWORK_TASK_HEAP_LARGEST_MIN);
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(NETWORK_TASK_HEAP_CHECK_INTERVAL_MS));
-        waited_ms += NETWORK_TASK_HEAP_CHECK_INTERVAL_MS;
+    if ((free_heap >= NETWORK_TASK_HTTPS_HEAP_FREE_MIN) &&
+        (largest >= NETWORK_TASK_HTTPS_HEAP_LARGEST_MIN)) {
+        return true;
     }
 
-    network_task_log_heap("post_playback_heap_timeout");
-    ESP_LOGW(TAG, "Post playback heap wait timed out; attempting cloud sync once");
+    ESP_LOGW(TAG,
+             "HTTPS heap insufficient: job=%s free=%u/%u largest=%u/%u",
+             job_name == NULL ? "unknown" : job_name,
+             (unsigned int)free_heap,
+             (unsigned int)NETWORK_TASK_HTTPS_HEAP_FREE_MIN,
+             (unsigned int)largest,
+             (unsigned int)NETWORK_TASK_HTTPS_HEAP_LARGEST_MIN);
     return false;
 }
 
-static bool network_task_take_playback_pull(bool *post_playback)
+static const char *network_task_playback_job_name(network_task_playback_reason_t reason)
 {
-    bool has_job = false;
-
-    network_task_lock();
-    if (s_pending_post_playback_pull) {
-        s_pending_post_playback_pull = false;
-        s_pending_playback_pull = false;
-        *post_playback = true;
-        has_job = true;
-    } else if (s_pending_playback_pull) {
-        s_pending_playback_pull = false;
-        *post_playback = false;
-        has_job = true;
+    switch (reason) {
+    case NETWORK_TASK_PLAYBACK_REASON_STARTUP:
+        return "startup_playback_pull";
+    case NETWORK_TASK_PLAYBACK_REASON_POST_PLAYBACK:
+        return "post_playback_pull";
+    case NETWORK_TASK_PLAYBACK_REASON_NORMAL:
+        return "playback_pull";
+    default:
+        return "playback_pull";
     }
-    network_task_unlock();
-
-    return has_job;
 }
 
-static bool network_task_take_audio_job(network_audio_job_t *job)
+static const char *network_task_weather_job_name(network_task_weather_reason_t reason)
+{
+    switch (reason) {
+    case NETWORK_TASK_WEATHER_REASON_STARTUP:
+        return "startup_weather_refresh";
+    case NETWORK_TASK_WEATHER_REASON_NORMAL:
+        return "weather_refresh";
+    default:
+        return "weather_refresh";
+    }
+}
+
+static bool network_task_audio_jobs_empty_locked(void)
 {
     size_t index = 0;
-    bool has_job = false;
 
-    if (job == NULL) {
-        return false;
-    }
-
-    network_task_lock();
     for (index = 0; index < NETWORK_TASK_MAX_AUDIO_JOBS; ++index) {
-        if (s_audio_jobs[index].in_use) {
-            *job = s_audio_jobs[index];
-            memset(&s_audio_jobs[index], 0, sizeof(s_audio_jobs[index]));
-            has_job = true;
-            break;
+        if (s_audio_download_jobs[index].in_use) {
+            return false;
         }
     }
-    network_task_unlock();
 
-    return has_job;
+    return true;
 }
 
-static bool network_task_take_report_job(network_report_job_t *job)
+static bool network_task_audio_url_queued_locked(const char *audio_url)
 {
     size_t index = 0;
-    bool has_job = false;
+
+    if ((audio_url == NULL) || (audio_url[0] == '\0')) {
+        return true;
+    }
+
+    for (index = 0; index < NETWORK_TASK_MAX_AUDIO_JOBS; ++index) {
+        if (s_audio_download_jobs[index].in_use &&
+            (strcmp(s_audio_download_jobs[index].audio_url, audio_url) == 0)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool network_task_take_next_job(network_task_job_t *job)
+{
+    size_t index = 0;
+    size_t best_audio_index = NETWORK_TASK_MAX_AUDIO_JOBS;
 
     if (job == NULL) {
         return false;
     }
+
+    memset(job, 0, sizeof(*job));
 
     network_task_lock();
     for (index = 0; index < NETWORK_TASK_MAX_REPORT_JOBS; ++index) {
         if (s_report_jobs[index].in_use) {
-            *job = s_report_jobs[index];
+            job->type = NETWORK_TASK_JOB_ALARM_REPORT;
+            job->data.report = s_report_jobs[index];
             memset(&s_report_jobs[index], 0, sizeof(s_report_jobs[index]));
-            has_job = true;
-            break;
+            network_task_unlock();
+            return true;
         }
     }
-    network_task_unlock();
 
-    return has_job;
-}
-
-static bool network_task_take_weather_refresh(void)
-{
-    bool has_job = false;
-
-    network_task_lock();
-    if (s_pending_weather_refresh) {
-        s_pending_weather_refresh = false;
-        has_job = true;
+    if (s_pending_playback_reason != NETWORK_TASK_PLAYBACK_REASON_NONE) {
+        job->type = NETWORK_TASK_JOB_ALARM_PULL;
+        job->data.playback_reason = s_pending_playback_reason;
+        s_pending_playback_reason = NETWORK_TASK_PLAYBACK_REASON_NONE;
+        network_task_unlock();
+        return true;
     }
-    network_task_unlock();
 
-    return has_job;
+    if (s_pending_weather_reason != NETWORK_TASK_WEATHER_REASON_NONE) {
+        job->type = NETWORK_TASK_JOB_WEATHER_REFRESH;
+        job->data.weather_reason = s_pending_weather_reason;
+        s_pending_weather_reason = NETWORK_TASK_WEATHER_REASON_NONE;
+        network_task_unlock();
+        return true;
+    }
+
+    for (index = 0; index < NETWORK_TASK_MAX_AUDIO_JOBS; ++index) {
+        if (!s_audio_download_jobs[index].in_use) {
+            continue;
+        }
+        if ((best_audio_index == NETWORK_TASK_MAX_AUDIO_JOBS) ||
+            (s_audio_download_jobs[index].ring_at_epoch <
+             s_audio_download_jobs[best_audio_index].ring_at_epoch)) {
+            best_audio_index = index;
+        }
+    }
+    if (best_audio_index < NETWORK_TASK_MAX_AUDIO_JOBS) {
+        job->type = NETWORK_TASK_JOB_AUDIO_DOWNLOAD;
+        job->data.audio_download = s_audio_download_jobs[best_audio_index];
+        memset(&s_audio_download_jobs[best_audio_index], 0, sizeof(s_audio_download_jobs[best_audio_index]));
+        network_task_unlock();
+        return true;
+    }
+
+    network_task_unlock();
+    return false;
 }
 
 static bool network_task_has_pending_work(void)
@@ -218,12 +265,13 @@ static bool network_task_has_pending_work(void)
     bool has_work = false;
 
     network_task_lock();
-    has_work = s_pending_post_playback_pull || s_pending_playback_pull || s_pending_weather_refresh;
-    for (index = 0; !has_work && (index < NETWORK_TASK_MAX_AUDIO_JOBS); ++index) {
-        has_work = s_audio_jobs[index].in_use;
-    }
+    has_work = (s_pending_playback_reason != NETWORK_TASK_PLAYBACK_REASON_NONE) ||
+               (s_pending_weather_reason != NETWORK_TASK_WEATHER_REASON_NONE);
     for (index = 0; !has_work && (index < NETWORK_TASK_MAX_REPORT_JOBS); ++index) {
         has_work = s_report_jobs[index].in_use;
+    }
+    for (index = 0; !has_work && (index < NETWORK_TASK_MAX_AUDIO_JOBS); ++index) {
+        has_work = s_audio_download_jobs[index].in_use;
     }
     network_task_unlock();
 
@@ -255,18 +303,20 @@ static void network_task_execute_playback_pull(device_cloud_session_t *session,
                                                device_cloud_http_response_t *response,
                                                char *request_body,
                                                size_t request_body_size,
-                                               bool post_playback)
+                                               network_task_playback_reason_t reason)
 {
     device_cloud_config_t config = {0};
     esp_err_t ret = ESP_OK;
+    const char *job_name = network_task_playback_job_name(reason);
 
-    if (post_playback) {
-        ESP_LOGI(TAG, "post_playback_pull pending");
-        (void)network_task_wait_for_post_playback_heap();
-    }
     network_task_clear_response(response);
 
-    ret = device_cloud_service_get_config(&config);
+    if (!network_task_https_heap_ready(job_name)) {
+        ret = ESP_ERR_NO_MEM;
+    }
+    if (ret == ESP_OK) {
+        ret = device_cloud_service_get_config(&config);
+    }
     if (ret == ESP_OK) {
         ret = device_cloud_service_build_device_request_json(request_body, request_body_size);
     }
@@ -281,6 +331,8 @@ static void network_task_execute_playback_pull(device_cloud_session_t *session,
                  response->status_code,
                  response->buffer == NULL ? "" : response->buffer);
         network_task_reset_session(session, response->buffer, response->buffer_size);
+    } else {
+        network_task_reset_session(session, response->buffer, response->buffer_size);
     }
 
     if (s_playback_handler != NULL) {
@@ -289,20 +341,30 @@ static void network_task_execute_playback_pull(device_cloud_session_t *session,
                            response->length,
                            s_playback_handler_ctx);
     }
-
     network_task_reset_session(session, response->buffer, response->buffer_size);
+
+    if ((reason == NETWORK_TASK_PLAYBACK_REASON_STARTUP) && (s_startup_pull_done_handler != NULL)) {
+        s_startup_pull_done_handler(ret, s_startup_pull_done_handler_ctx);
+    }
 }
 
 static void network_task_execute_weather_refresh(device_cloud_session_t *session,
                                                  device_cloud_http_response_t *response,
                                                  char *request_body,
-                                                 size_t request_body_size)
+                                                 size_t request_body_size,
+                                                 network_task_weather_reason_t reason)
 {
     device_cloud_config_t config = {0};
     esp_err_t ret = ESP_OK;
+    const char *job_name = network_task_weather_job_name(reason);
 
     network_task_clear_response(response);
-    ret = device_cloud_service_get_config(&config);
+    if (!network_task_https_heap_ready(job_name)) {
+        ret = ESP_ERR_NO_MEM;
+    }
+    if (ret == ESP_OK) {
+        ret = device_cloud_service_get_config(&config);
+    }
     if (ret == ESP_OK) {
         ret = device_cloud_service_build_device_request_json(request_body, request_body_size);
     }
@@ -317,6 +379,8 @@ static void network_task_execute_weather_refresh(device_cloud_session_t *session
                  response->status_code,
                  response->buffer == NULL ? "" : response->buffer);
         network_task_reset_session(session, response->buffer, response->buffer_size);
+    } else {
+        network_task_reset_session(session, response->buffer, response->buffer_size);
     }
 
     if (s_weather_handler != NULL) {
@@ -327,31 +391,131 @@ static void network_task_execute_weather_refresh(device_cloud_session_t *session
     }
 
     network_task_reset_session(session, response->buffer, response->buffer_size);
+
+    if ((reason == NETWORK_TASK_WEATHER_REASON_STARTUP) && (s_startup_weather_done_handler != NULL)) {
+        s_startup_weather_done_handler(ret, s_startup_weather_done_handler_ctx);
+    }
 }
 
-static void network_task_execute_audio_download(const network_audio_job_t *job)
+static void network_task_audio_cache_result_bridge(const char *audio_url,
+                                                   esp_err_t ret,
+                                                   const char *local_path,
+                                                   void *ctx)
 {
-    char local_path[96] = {0};
-    esp_err_t ret = ESP_OK;
+    (void)ctx;
 
-    if ((job == NULL) || (job->instance_id[0] == '\0') || (job->audio_url[0] == '\0')) {
+    if (s_audio_cache_handler != NULL) {
+        s_audio_cache_handler(audio_url,
+                              ret,
+                              local_path,
+                              s_audio_cache_handler_ctx);
+    }
+}
+
+static void network_task_finish_audio_download(esp_err_t ret)
+{
+    bool batch_done = false;
+    esp_err_t done_ret = ESP_OK;
+
+    network_task_lock();
+    if (s_audio_cache_batch_active) {
+        if ((ret != ESP_OK) && (s_audio_cache_batch_ret == ESP_OK)) {
+            s_audio_cache_batch_ret = ret;
+        }
+        if (network_task_audio_jobs_empty_locked()) {
+            batch_done = true;
+            done_ret = s_audio_cache_batch_ret;
+            s_audio_cache_batch_active = false;
+            s_audio_cache_batch_ret = ESP_OK;
+            s_audio_cache_cleanup_pending = false;
+        }
+    }
+    network_task_unlock();
+
+    if (batch_done && (s_audio_cache_done_handler != NULL)) {
+        s_audio_cache_done_handler(done_ret, s_audio_cache_done_handler_ctx);
+    }
+}
+
+static void network_task_cleanup_audio_cache_if_needed(const network_audio_download_job_t *current_job)
+{
+    char protected_path[AUDIO_CACHE_PATH_MAX] = {0};
+    char keep_paths[NETWORK_TASK_MAX_AUDIO_JOBS + 1U][AUDIO_CACHE_PATH_MAX] = {0};
+    const char *keep_path_ptrs[NETWORK_TASK_MAX_AUDIO_JOBS + 1U] = {0};
+    size_t index = 0;
+    size_t keep_count = 0;
+    bool should_cleanup = false;
+
+    network_task_lock();
+    should_cleanup = s_audio_cache_cleanup_pending;
+    if (should_cleanup) {
+        s_audio_cache_cleanup_pending = false;
+        network_task_copy_string(protected_path, sizeof(protected_path), s_audio_cache_protected_path);
+        if ((current_job != NULL) && current_job->audio_url[0] != '\0') {
+            if (audio_cache_service_resolve_path(NULL,
+                                                 current_job->audio_url,
+                                                 keep_paths[keep_count],
+                                                 sizeof(keep_paths[keep_count])) == ESP_OK) {
+                keep_path_ptrs[keep_count] = keep_paths[keep_count];
+                ++keep_count;
+            }
+        }
+        for (index = 0; (index < NETWORK_TASK_MAX_AUDIO_JOBS) && (keep_count < (NETWORK_TASK_MAX_AUDIO_JOBS + 1U)); ++index) {
+            if (s_audio_download_jobs[index].in_use) {
+                if (audio_cache_service_resolve_path(NULL,
+                                                     s_audio_download_jobs[index].audio_url,
+                                                     keep_paths[keep_count],
+                                                     sizeof(keep_paths[keep_count])) == ESP_OK) {
+                    keep_path_ptrs[keep_count] = keep_paths[keep_count];
+                    ++keep_count;
+                }
+            }
+        }
+    }
+    network_task_unlock();
+
+    if (!should_cleanup) {
         return;
     }
 
-    ESP_LOGI(TAG, "Downloading audio for %s", job->instance_id);
-    network_task_log_heap("before_audio_download");
-    ret = audio_cache_service_download(job->instance_id,
-                                       job->audio_url,
-                                       local_path,
-                                       sizeof(local_path));
-    network_task_log_heap("after_audio_download");
+    ESP_LOGI(TAG, "Cleaning audio cache keep=%u protected=%s",
+             (unsigned int)keep_count,
+             protected_path);
+    (void)audio_cache_service_cleanup_unused_protected(keep_path_ptrs, keep_count, protected_path);
+}
 
-    if (s_audio_handler != NULL) {
-        s_audio_handler(job->instance_id,
-                        ret,
-                        local_path,
-                        s_audio_handler_ctx);
+static void network_task_execute_audio_download(const network_audio_download_job_t *job)
+{
+    char local_path[AUDIO_CACHE_PATH_MAX] = {0};
+    esp_err_t ret = ESP_OK;
+
+    if ((job == NULL) || (job->audio_url[0] == '\0')) {
+        network_task_finish_audio_download(ESP_ERR_INVALID_ARG);
+        return;
     }
+
+    network_task_cleanup_audio_cache_if_needed(job);
+
+    ret = audio_cache_service_resolve_path(NULL, job->audio_url, local_path, sizeof(local_path));
+    if (ret != ESP_OK) {
+        network_task_audio_cache_result_bridge(job->audio_url, ret, "", NULL);
+        network_task_finish_audio_download(ret);
+        return;
+    }
+
+    if (audio_cache_service_file_exists(local_path)) {
+        ESP_LOGI(TAG, "Audio cache hit via network queue: path=%s", local_path);
+        network_task_audio_cache_result_bridge(job->audio_url, ESP_OK, local_path, NULL);
+        network_task_finish_audio_download(ESP_OK);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Running audio_download path=%s", local_path);
+    network_task_log_heap("before_audio_download");
+    ret = audio_cache_service_download(NULL, job->audio_url, local_path, sizeof(local_path));
+    network_task_log_heap("after_audio_download");
+    network_task_audio_cache_result_bridge(job->audio_url, ret, local_path, NULL);
+    network_task_finish_audio_download(ret);
 }
 
 static void network_task_execute_report(device_cloud_session_t *session,
@@ -369,7 +533,12 @@ static void network_task_execute_report(device_cloud_session_t *session,
     }
 
     network_task_clear_response(response);
-    ret = device_cloud_service_get_config(&config);
+    if (!network_task_https_heap_ready("playback_report")) {
+        ret = ESP_ERR_NO_MEM;
+    }
+    if (ret == ESP_OK) {
+        ret = device_cloud_service_get_config(&config);
+    }
     if (ret != ESP_OK) {
         return;
     }
@@ -435,12 +604,13 @@ static void network_task_worker(void *arg)
     response.buffer = response_buffer;
     response.buffer_size = NETWORK_TASK_RESPONSE_BYTES;
     device_cloud_session_init(&session, response_buffer, NETWORK_TASK_RESPONSE_BYTES);
+    ESP_LOGI(TAG,
+             "network_task stack_free=%u bytes",
+             (unsigned int)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
 
     while (true) {
         uint32_t notify_bits = 0;
-        bool post_playback = false;
-        network_audio_job_t audio_job = {0};
-        network_report_job_t report_job = {0};
+        network_task_job_t job = {0};
 
         xEventGroupWaitBits(s_connected_event_group,
                             s_connected_bit,
@@ -458,32 +628,40 @@ static void network_task_worker(void *arg)
             network_task_reset_session(&session, response_buffer, NETWORK_TASK_RESPONSE_BYTES);
         }
 
-        if (network_task_take_playback_pull(&post_playback)) {
-            network_task_execute_playback_pull(&session,
-                                               &response,
-                                               request_body,
-                                               sizeof(request_body),
-                                               post_playback);
+        if (!network_task_take_next_job(&job)) {
             continue;
         }
-        if (network_task_take_audio_job(&audio_job)) {
-            network_task_execute_audio_download(&audio_job);
-            continue;
-        }
-        if (network_task_take_report_job(&report_job)) {
+
+        switch (job.type) {
+        case NETWORK_TASK_JOB_ALARM_REPORT:
             network_task_execute_report(&session,
                                         &response,
                                         request_body,
                                         sizeof(request_body),
-                                        &report_job);
-            continue;
-        }
-        if (network_task_take_weather_refresh()) {
+                                        &job.data.report);
+            break;
+        case NETWORK_TASK_JOB_ALARM_PULL:
+            network_task_execute_playback_pull(&session,
+                                               &response,
+                                               request_body,
+                                               sizeof(request_body),
+                                               job.data.playback_reason);
+            break;
+        case NETWORK_TASK_JOB_WEATHER_REFRESH:
             network_task_execute_weather_refresh(&session,
                                                  &response,
                                                  request_body,
-                                                 sizeof(request_body));
-            continue;
+                                                 sizeof(request_body),
+                                                 job.data.weather_reason);
+            break;
+        case NETWORK_TASK_JOB_AUDIO_DOWNLOAD:
+            network_task_reset_session(&session, response_buffer, NETWORK_TASK_RESPONSE_BYTES);
+            network_task_execute_audio_download(&job.data.audio_download);
+            break;
+        case NETWORK_TASK_JOB_LOW_SYNC:
+        case NETWORK_TASK_JOB_NONE:
+        default:
+            break;
         }
     }
 }
@@ -541,81 +719,139 @@ void network_task_service_register_weather_handler(network_task_json_result_cb_t
     s_weather_handler_ctx = ctx;
 }
 
-void network_task_service_register_audio_download_handler(network_task_audio_result_cb_t handler, void *ctx)
+void network_task_service_register_audio_cache_handler(network_task_audio_cache_result_cb_t handler, void *ctx)
 {
-    s_audio_handler = handler;
-    s_audio_handler_ctx = ctx;
+    s_audio_cache_handler = handler;
+    s_audio_cache_handler_ctx = ctx;
 }
 
-void network_task_service_request_playback_pull(bool post_playback)
+void network_task_service_register_audio_cache_done_handler(network_task_audio_cache_done_cb_t handler, void *ctx)
 {
+    s_audio_cache_done_handler = handler;
+    s_audio_cache_done_handler_ctx = ctx;
+}
+
+void network_task_service_register_startup_pull_done_handler(network_task_startup_pull_done_cb_t handler, void *ctx)
+{
+    s_startup_pull_done_handler = handler;
+    s_startup_pull_done_handler_ctx = ctx;
+}
+
+void network_task_service_register_startup_weather_done_handler(network_task_startup_weather_done_cb_t handler,
+                                                                void *ctx)
+{
+    s_startup_weather_done_handler = handler;
+    s_startup_weather_done_handler_ctx = ctx;
+}
+
+void network_task_service_request_playback_pull(network_task_playback_reason_t reason)
+{
+    if (reason == NETWORK_TASK_PLAYBACK_REASON_NONE) {
+        reason = NETWORK_TASK_PLAYBACK_REASON_NORMAL;
+    }
+
     network_task_lock();
-    if (post_playback) {
-        s_pending_post_playback_pull = true;
-        s_pending_playback_pull = false;
-    } else if (!s_pending_post_playback_pull) {
-        s_pending_playback_pull = true;
+    if (reason == NETWORK_TASK_PLAYBACK_REASON_POST_PLAYBACK) {
+        s_pending_playback_reason = reason;
+    } else if ((reason == NETWORK_TASK_PLAYBACK_REASON_STARTUP) &&
+               (s_pending_playback_reason != NETWORK_TASK_PLAYBACK_REASON_POST_PLAYBACK)) {
+        s_pending_playback_reason = reason;
+    } else if (s_pending_playback_reason == NETWORK_TASK_PLAYBACK_REASON_NONE) {
+        s_pending_playback_reason = reason;
     }
     network_task_unlock();
 
-    ESP_LOGI(TAG, "Queued %s", post_playback ? "post_playback_pull" : "playback_pull");
+    ESP_LOGI(TAG, "Queued %s", network_task_playback_job_name(reason));
     network_task_notify();
 }
 
-void network_task_service_request_weather_refresh(void)
+void network_task_service_request_weather_refresh(network_task_weather_reason_t reason)
 {
+    bool queued = false;
+
+    if (reason == NETWORK_TASK_WEATHER_REASON_NONE) {
+        reason = NETWORK_TASK_WEATHER_REASON_NORMAL;
+    }
+
     network_task_lock();
-    s_pending_weather_refresh = true;
+    if (reason == NETWORK_TASK_WEATHER_REASON_STARTUP) {
+        s_pending_weather_reason = reason;
+        queued = true;
+    } else if (s_pending_weather_reason != NETWORK_TASK_WEATHER_REASON_STARTUP) {
+        s_pending_weather_reason = reason;
+        queued = true;
+    }
     network_task_unlock();
 
-    ESP_LOGI(TAG, "Queued weather_refresh");
-    network_task_notify();
+    if (queued) {
+        ESP_LOGI(TAG, "Queued %s", network_task_weather_job_name(reason));
+        network_task_notify();
+    } else {
+        ESP_LOGI(TAG, "Skipped weather_refresh because startup_weather_refresh is pending");
+    }
 }
 
-void network_task_service_request_audio_download(const char *instance_id, const char *audio_url)
+void network_task_service_request_audio_cache_maintenance(const network_task_audio_cache_item_t *items,
+                                                          size_t item_count,
+                                                          const char *protected_path)
 {
     size_t index = 0;
-    size_t free_index = NETWORK_TASK_MAX_AUDIO_JOBS;
+    size_t queued_count = 0;
+    size_t dropped_count = 0;
 
-    if ((instance_id == NULL) || (instance_id[0] == '\0') ||
-        (audio_url == NULL) || (audio_url[0] == '\0')) {
+    if ((items == NULL) || (item_count == 0)) {
         return;
     }
 
     network_task_lock();
-    for (index = 0; index < NETWORK_TASK_MAX_AUDIO_JOBS; ++index) {
-        if (s_audio_jobs[index].in_use &&
-            (strcmp(s_audio_jobs[index].instance_id, instance_id) == 0)) {
-            network_task_copy_string(s_audio_jobs[index].audio_url,
-                                     sizeof(s_audio_jobs[index].audio_url),
-                                     audio_url);
-            network_task_unlock();
-            ESP_LOGI(TAG, "Replaced audio_download for %s", instance_id);
-            network_task_notify();
-            return;
+    memset(s_audio_download_jobs, 0, sizeof(s_audio_download_jobs));
+    network_task_copy_string(s_audio_cache_protected_path,
+                             sizeof(s_audio_cache_protected_path),
+                             protected_path);
+    s_audio_cache_batch_active = true;
+    s_audio_cache_batch_ret = ESP_OK;
+    s_audio_cache_cleanup_pending = true;
+
+    for (index = 0; index < item_count; ++index) {
+        size_t slot = 0;
+
+        if (items[index].audio_url[0] == '\0') {
+            continue;
         }
-        if (!s_audio_jobs[index].in_use && (free_index == NETWORK_TASK_MAX_AUDIO_JOBS)) {
-            free_index = index;
+        if (network_task_audio_url_queued_locked(items[index].audio_url)) {
+            continue;
+        }
+        for (slot = 0; slot < NETWORK_TASK_MAX_AUDIO_JOBS; ++slot) {
+            if (!s_audio_download_jobs[slot].in_use) {
+                s_audio_download_jobs[slot].in_use = true;
+                network_task_copy_string(s_audio_download_jobs[slot].audio_url,
+                                         sizeof(s_audio_download_jobs[slot].audio_url),
+                                         items[index].audio_url);
+                s_audio_download_jobs[slot].ring_at_epoch = items[index].ring_at_epoch;
+                ++queued_count;
+                break;
+            }
+        }
+        if (slot >= NETWORK_TASK_MAX_AUDIO_JOBS) {
+            ++dropped_count;
         }
     }
-    if (free_index < NETWORK_TASK_MAX_AUDIO_JOBS) {
-        s_audio_jobs[free_index].in_use = true;
-        network_task_copy_string(s_audio_jobs[free_index].instance_id,
-                                 sizeof(s_audio_jobs[free_index].instance_id),
-                                 instance_id);
-        network_task_copy_string(s_audio_jobs[free_index].audio_url,
-                                 sizeof(s_audio_jobs[free_index].audio_url),
-                                 audio_url);
+
+    if (queued_count == 0U) {
+        s_audio_cache_batch_active = false;
+        s_audio_cache_cleanup_pending = false;
     }
     network_task_unlock();
 
-    if (free_index >= NETWORK_TASK_MAX_AUDIO_JOBS) {
-        ESP_LOGW(TAG, "Audio download queue full, dropping %s", instance_id);
-        return;
+    ESP_LOGI(TAG,
+             "Queued audio_download jobs=%u dropped=%u",
+             (unsigned int)queued_count,
+             (unsigned int)dropped_count);
+    if (queued_count > 0U) {
+        network_task_notify();
+    } else if (s_audio_cache_done_handler != NULL) {
+        s_audio_cache_done_handler(ESP_OK, s_audio_cache_done_handler_ctx);
     }
-
-    ESP_LOGI(TAG, "Queued audio_download for %s", instance_id);
-    network_task_notify();
 }
 
 void network_task_service_request_playback_report(const char *instance_id,

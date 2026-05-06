@@ -16,8 +16,8 @@
  * - rotation.{swap_xy,mirror_x,mirror_y}: must match the same hardware mapping already used with
  *   esp_lcd_panel_swap_xy / esp_lcd_panel_mirror in display_service.c (DISPLAY_SWAP_XY, etc.).
  * - buffer_size: in **pixels** (not bytes), per esp_lvgl_port. Partial refresh: width * N lines.
- *   spi_lcd_touch uses ~1/10 screen; we use 24 lines (~10% of 240) as a similar trade-off on WROOM-32E.
- * - double_buffer: true — smoothness; costs 2x the pixel buffer RAM.
+ *   spi_lcd_touch uses ~1/10 screen; this project uses 8 lines to preserve DMA-capable heap.
+ * - double_buffer: false to keep one draw buffer on WROOM-32E.
  * - flags.buff_dma: true — required for SPI DMA path with RGB565 (see port README "DMA buffer" note).
  * - flags.buff_spiram: false — no PSRAM on typical WROOM-32E; keep buffers in internal DMA-capable RAM.
  * - flags.sw_rotate: false — use hardware rotation via esp_lcd + rotation cfg (not software rotate).
@@ -35,7 +35,7 @@
 #include "esp_lvgl_port.h"
 
 /** Lines per LVGL draw buffer (partial refresh). Increase for smoother redraw, decrease to save RAM. */
-#define DISPLAY_LVGL_PORT_BUFFER_LINES 24
+#define DISPLAY_LVGL_PORT_BUFFER_LINES 8
 
 /** buffer_size for lvgl_port_display_cfg_t, in pixels (see esp_lvgl_port_disp.h). */
 #define DISPLAY_LVGL_PORT_BUFFER_PIXELS (DISPLAY_WIDTH * DISPLAY_LVGL_PORT_BUFFER_LINES)
@@ -56,7 +56,7 @@ static inline void display_lvgl_port_fill_display_cfg(esp_lcd_panel_io_handle_t 
         .panel_handle = panel_handle,
         .control_handle = NULL,
         .buffer_size = DISPLAY_LVGL_PORT_BUFFER_PIXELS,
-        .double_buffer = true,
+        .double_buffer = false,
         .trans_size = 0,
         .hres = DISPLAY_WIDTH,
         .vres = DISPLAY_HEIGHT,

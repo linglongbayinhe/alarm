@@ -1,51 +1,62 @@
 #include "audio_cache_service.h"
 
 #include <dirent.h>
+#include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <stdint.h>
 #include <sys/stat.h>
 
-#include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_vfs_fat.h"
+#include "esp_wifi.h"
 #include "storage_service.h"
+
+#if !defined(CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY) || !CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY
+#include "esp_crt_bundle.h"
+#endif
 
 static const char *TAG = "AUDIO_CACHE";
 
-#define AUDIO_CACHE_PATH_MAX 160
-#define AUDIO_CACHE_HTTP_TIMEOUT_MS 15000
-#define AUDIO_CACHE_DOWNLOAD_BUFFER_SIZE 2048
+#define AUDIO_CACHE_HTTP_TIMEOUT_MS 30000
+#define AUDIO_CACHE_DOWNLOAD_BUFFER_SIZE 1024
+#define AUDIO_CACHE_DOWNLOAD_MARGIN_BYTES 4096
+#define AUDIO_CACHE_DOWNLOAD_HEAP_FREE_MIN 50000
+#define AUDIO_CACHE_DOWNLOAD_HEAP_LARGEST_MIN 24000
 
 static bool s_ready;
 
-static bool audio_cache_is_safe_char(char value)
+static bool audio_cache_download_heap_ready(const char *audio_url);
+static bool audio_cache_disable_wifi_power_save(wifi_ps_type_t *previous_ps);
+static void audio_cache_restore_wifi_power_save(wifi_ps_type_t previous_ps, bool should_restore);
+
+typedef struct {
+    char audio_url[AUDIO_CACHE_URL_SIZE];
+    char path[AUDIO_CACHE_PATH_MAX];
+    int64_t ring_at_epoch;
+    bool cached;
+} audio_cache_plan_item_t;
+
+uint32_t audio_cache_service_hash_url(const char *audio_url)
 {
-    return ((value >= 'a') && (value <= 'z')) ||
-           ((value >= 'A') && (value <= 'Z')) ||
-           ((value >= '0') && (value <= '9')) ||
-           (value == '_') ||
-           (value == '-');
-}
+    uint32_t hash = 2166136261U;
 
-static void audio_cache_sanitize_name(const char *source, char *destination, size_t destination_size)
-{
-    size_t index = 0;
-
-    if ((destination == NULL) || (destination_size == 0)) {
-        return;
+    if (audio_url == NULL) {
+        return hash;
     }
 
-    if (source == NULL) {
-        destination[0] = '\0';
-        return;
+    while (*audio_url != '\0') {
+        hash ^= (uint8_t)*audio_url;
+        hash *= 16777619U;
+        ++audio_url;
     }
 
-    for (index = 0; (index + 1) < destination_size && source[index] != '\0'; ++index) {
-        destination[index] = audio_cache_is_safe_char(source[index]) ? source[index] : '_';
-    }
-    destination[index] = '\0';
+    return hash;
 }
 
 static const char *audio_cache_detect_extension(const char *audio_url)
@@ -80,9 +91,15 @@ static const char *audio_cache_detect_extension(const char *audio_url)
 
 static bool audio_cache_path_is_kept(const char *path,
                                      const char *const *keep_paths,
-                                     size_t keep_path_count)
+                                     size_t keep_path_count,
+                                     const char *protected_path)
 {
     size_t index = 0;
+
+    if ((protected_path != NULL) && (protected_path[0] != '\0') &&
+        (path != NULL) && (strcmp(path, protected_path) == 0)) {
+        return true;
+    }
 
     for (index = 0; index < keep_path_count; ++index) {
         if ((keep_paths[index] != NULL) && (strcmp(path, keep_paths[index]) == 0)) {
@@ -115,33 +132,77 @@ bool audio_cache_service_file_exists(const char *path)
     return stat(path, &info) == 0;
 }
 
+static uint64_t audio_cache_get_free_bytes(void)
+{
+    uint64_t total_bytes = 0;
+    uint64_t free_bytes = 0;
+
+    if (!s_ready ||
+        (esp_vfs_fat_info(STORAGE_SERVICE_EXTERNAL_BASE_PATH, &total_bytes, &free_bytes) != ESP_OK)) {
+        return 0;
+    }
+
+    return free_bytes;
+}
+
 esp_err_t audio_cache_service_resolve_path(const char *instance_id,
                                            const char *audio_url,
                                            char *path_buffer,
                                            size_t path_buffer_size)
 {
-    char safe_name[80] = {0};
     const char *extension = NULL;
+    uint32_t audio_hash = 0;
 
-    if ((instance_id == NULL) || (path_buffer == NULL) || (path_buffer_size == 0)) {
+    (void)instance_id;
+
+    if ((audio_url == NULL) || (audio_url[0] == '\0') ||
+        (path_buffer == NULL) || (path_buffer_size == 0)) {
         return ESP_ERR_INVALID_ARG;
     }
     if (!s_ready) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    audio_cache_sanitize_name(instance_id, safe_name, sizeof(safe_name));
     extension = audio_cache_detect_extension(audio_url);
+    audio_hash = audio_cache_service_hash_url(audio_url);
     if (snprintf(path_buffer,
                  path_buffer_size,
-                 "%s/%s%s",
+                 "%s/%08" PRIx32 "%s",
                  STORAGE_SERVICE_EXTERNAL_AUDIO_DIR,
-                 safe_name,
+                 audio_hash,
                  extension) >= (int)path_buffer_size) {
         return ESP_ERR_INVALID_SIZE;
     }
 
     return ESP_OK;
+}
+
+bool audio_cache_service_find_existing(const char *instance_id,
+                                       const char *audio_url,
+                                       char *path_buffer,
+                                       size_t path_buffer_size)
+{
+    char resolved_path[AUDIO_CACHE_PATH_MAX] = {0};
+    int written = 0;
+
+    if (audio_cache_service_resolve_path(instance_id,
+                                         audio_url,
+                                         resolved_path,
+                                         sizeof(resolved_path)) != ESP_OK) {
+        return false;
+    }
+    if (!audio_cache_service_file_exists(resolved_path)) {
+        return false;
+    }
+
+    if ((path_buffer != NULL) && (path_buffer_size > 0)) {
+        written = snprintf(path_buffer, path_buffer_size, "%s", resolved_path);
+        if ((written < 0) || ((size_t)written >= path_buffer_size)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 esp_err_t audio_cache_service_download(const char *instance_id,
@@ -156,8 +217,11 @@ esp_err_t audio_cache_service_download(const char *instance_id,
     FILE *file = NULL;
     uint8_t *download_buffer = NULL;
     esp_err_t ret = ESP_OK;
+    size_t bytes_written_total = 0;
+    wifi_ps_type_t previous_wifi_ps = WIFI_PS_NONE;
+    bool restore_wifi_ps = false;
 
-    if ((instance_id == NULL) || (audio_url == NULL)) {
+    if ((audio_url == NULL) || (audio_url[0] == '\0')) {
         return ESP_ERR_INVALID_ARG;
     }
     if (!s_ready) {
@@ -168,17 +232,22 @@ esp_err_t audio_cache_service_download(const char *instance_id,
     if (ret != ESP_OK) {
         return ret;
     }
+    if ((path_buffer != NULL) && (path_buffer_size > 0)) {
+        snprintf(path_buffer, path_buffer_size, "%s", final_path);
+    }
 
     if (audio_cache_service_file_exists(final_path)) {
-        if ((path_buffer != NULL) && (path_buffer_size > 0)) {
-            snprintf(path_buffer, path_buffer_size, "%s", final_path);
-        }
+        ESP_LOGI(TAG, "Cache hit: path=%s url=%s", final_path, audio_url);
         return ESP_OK;
     }
 
     if (snprintf(temp_path, sizeof(temp_path), "%s.part", final_path) >= (int)sizeof(temp_path)) {
         return ESP_ERR_INVALID_SIZE;
     }
+    if (!audio_cache_download_heap_ready(audio_url)) {
+        return ESP_ERR_NO_MEM;
+    }
+    restore_wifi_ps = audio_cache_disable_wifi_power_save(&previous_wifi_ps);
 
     client_config.url = audio_url;
     client_config.method = HTTP_METHOD_GET;
@@ -193,24 +262,72 @@ esp_err_t audio_cache_service_download(const char *instance_id,
     if (client == NULL) {
         return ESP_FAIL;
     }
+    (void)esp_http_client_set_header(client, "User-Agent", "ESP32-Alarm/1.0");
+    (void)esp_http_client_set_header(client, "Accept", "audio/mpeg,*/*");
+    (void)esp_http_client_set_header(client, "Accept-Encoding", "identity");
+    (void)esp_http_client_set_header(client, "Connection", "close");
 
+    ESP_LOGI(TAG, "Download start: url=%s path=%s", audio_url, final_path);
+    errno = 0;
     ret = esp_http_client_open(client, 0);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Open download failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG,
+                 "Open download failed: %s errno=%d(%s)",
+                 esp_err_to_name(ret),
+                 errno,
+                 strerror(errno));
         goto cleanup;
     }
+    ESP_LOGI(TAG, "Download connection opened: path=%s", final_path);
 
-    if (esp_http_client_fetch_headers(client) < 0) {
-        ret = ESP_FAIL;
-        goto cleanup;
+    {
+        errno = 0;
+        int64_t header_len = esp_http_client_fetch_headers(client);
+        if (header_len < 0) {
+            ESP_LOGE(TAG,
+                     "Fetch download headers failed: header_len=%" PRId64 " status=%d errno=%d(%s) path=%s",
+                     header_len,
+                     esp_http_client_get_status_code(client),
+                     errno,
+                     strerror(errno),
+                     final_path);
+            ret = ESP_FAIL;
+            goto cleanup;
+        }
     }
     if (esp_http_client_get_status_code(client) / 100 != 2) {
+        ESP_LOGE(TAG,
+                 "Download HTTP status rejected: status=%d path=%s",
+                 esp_http_client_get_status_code(client),
+                 final_path);
         ret = ESP_FAIL;
         goto cleanup;
+    }
+    {
+        int64_t content_length = esp_http_client_get_content_length(client);
+        ESP_LOGI(TAG,
+                 "Download headers: status=%d content_length=%" PRId64 " path=%s",
+                 esp_http_client_get_status_code(client),
+                 content_length,
+                 final_path);
+        if (content_length > 0) {
+            uint64_t free_bytes = audio_cache_get_free_bytes();
+            if ((free_bytes > 0) &&
+                (((uint64_t)content_length + AUDIO_CACHE_DOWNLOAD_MARGIN_BYTES) > free_bytes)) {
+                ESP_LOGW(TAG,
+                         "Not enough cache space for %s: need=%" PRIu64 " free=%" PRIu64,
+                         final_path,
+                         (uint64_t)content_length,
+                         free_bytes);
+                ret = ESP_ERR_NO_MEM;
+                goto cleanup;
+            }
+        }
     }
 
     file = fopen(temp_path, "wb");
     if (file == NULL) {
+        ESP_LOGE(TAG, "Open temp audio file failed: errno=%d(%s) path=%s", errno, strerror(errno), temp_path);
         ret = ESP_FAIL;
         goto cleanup;
     }
@@ -222,20 +339,37 @@ esp_err_t audio_cache_service_download(const char *instance_id,
     }
 
     while (true) {
+        errno = 0;
         int bytes_read = esp_http_client_read(client,
                                               (char *)download_buffer,
                                               AUDIO_CACHE_DOWNLOAD_BUFFER_SIZE);
         if (bytes_read < 0) {
+            ESP_LOGE(TAG,
+                     "Read download body failed: bytes=%d written=%u errno=%d(%s) path=%s",
+                     bytes_read,
+                     (unsigned int)bytes_written_total,
+                     errno,
+                     strerror(errno),
+                     final_path);
             ret = ESP_FAIL;
             goto cleanup;
         }
         if (bytes_read == 0) {
             break;
         }
+        errno = 0;
         if (fwrite(download_buffer, 1, (size_t)bytes_read, file) != (size_t)bytes_read) {
+            ESP_LOGE(TAG,
+                     "Write download file failed: bytes=%d written=%u errno=%d(%s) path=%s",
+                     bytes_read,
+                     (unsigned int)bytes_written_total,
+                     errno,
+                     strerror(errno),
+                     temp_path);
             ret = ESP_FAIL;
             goto cleanup;
         }
+        bytes_written_total += (size_t)bytes_read;
     }
 
     fclose(file);
@@ -250,6 +384,11 @@ esp_err_t audio_cache_service_download(const char *instance_id,
     if ((path_buffer != NULL) && (path_buffer_size > 0)) {
         snprintf(path_buffer, path_buffer_size, "%s", final_path);
     }
+    ESP_LOGI(TAG,
+             "Download finished: path=%s bytes=%u url=%s",
+             final_path,
+             (unsigned int)bytes_written_total,
+             audio_url);
 
 cleanup:
     if (file != NULL) {
@@ -257,17 +396,25 @@ cleanup:
     }
     if (ret != ESP_OK) {
         remove(temp_path);
+        ESP_LOGW(TAG,
+                 "Download failed: path=%s ret=%s url=%s",
+                 final_path,
+                 esp_err_to_name(ret),
+                 audio_url);
     }
     if (client != NULL) {
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
     }
     free(download_buffer);
+    audio_cache_restore_wifi_power_save(previous_wifi_ps, restore_wifi_ps);
 
     return ret;
 }
 
-esp_err_t audio_cache_service_cleanup_unused(const char *const *keep_paths, size_t keep_path_count)
+static esp_err_t audio_cache_service_cleanup_unused_with_protected(const char *const *keep_paths,
+                                                                   size_t keep_path_count,
+                                                                   const char *protected_path)
 {
     DIR *directory = NULL;
     struct dirent *entry = NULL;
@@ -293,11 +440,300 @@ esp_err_t audio_cache_service_cleanup_unused(const char *const *keep_paths, size
                      entry->d_name) >= (int)sizeof(full_path)) {
             continue;
         }
-        if (!audio_cache_path_is_kept(full_path, keep_paths, keep_path_count)) {
+        if (!audio_cache_path_is_kept(full_path, keep_paths, keep_path_count, protected_path)) {
+            ESP_LOGI(TAG, "Removing unused cached audio %s", full_path);
             remove(full_path);
         }
     }
 
     closedir(directory);
     return ESP_OK;
+}
+
+esp_err_t audio_cache_service_cleanup_unused(const char *const *keep_paths, size_t keep_path_count)
+{
+    return audio_cache_service_cleanup_unused_with_protected(keep_paths, keep_path_count, NULL);
+}
+
+esp_err_t audio_cache_service_cleanup_unused_protected(const char *const *keep_paths,
+                                                       size_t keep_path_count,
+                                                       const char *protected_path)
+{
+    return audio_cache_service_cleanup_unused_with_protected(keep_paths, keep_path_count, protected_path);
+}
+
+static int audio_cache_plan_compare_ring_time(const void *left, const void *right)
+{
+    const audio_cache_plan_item_t *left_item = (const audio_cache_plan_item_t *)left;
+    const audio_cache_plan_item_t *right_item = (const audio_cache_plan_item_t *)right;
+
+    if (left_item->ring_at_epoch < right_item->ring_at_epoch) {
+        return -1;
+    }
+    if (left_item->ring_at_epoch > right_item->ring_at_epoch) {
+        return 1;
+    }
+    return strcmp(left_item->path, right_item->path);
+}
+
+static bool audio_cache_plan_contains_path(const audio_cache_plan_item_t *items,
+                                           size_t item_count,
+                                           const char *path,
+                                           size_t *index_out)
+{
+    size_t index = 0;
+
+    if (path == NULL) {
+        return false;
+    }
+
+    for (index = 0; index < item_count; ++index) {
+        if (strcmp(items[index].path, path) == 0) {
+            if (index_out != NULL) {
+                *index_out = index;
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void audio_cache_notify_result(audio_cache_maintenance_result_cb_t result_cb,
+                                      void *result_ctx,
+                                      const char *audio_url,
+                                      esp_err_t ret,
+                                      const char *local_path)
+{
+    if (result_cb != NULL) {
+        result_cb(audio_url, ret, local_path == NULL ? "" : local_path, result_ctx);
+    }
+}
+
+static bool audio_cache_download_heap_ready(const char *audio_url)
+{
+    uint32_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    uint32_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+
+    if ((free_heap >= AUDIO_CACHE_DOWNLOAD_HEAP_FREE_MIN) &&
+        (largest >= AUDIO_CACHE_DOWNLOAD_HEAP_LARGEST_MIN)) {
+        return true;
+    }
+
+    ESP_LOGW(TAG,
+             "Audio download heap insufficient: free=%u/%u largest=%u/%u url=%s",
+             (unsigned int)free_heap,
+             (unsigned int)AUDIO_CACHE_DOWNLOAD_HEAP_FREE_MIN,
+             (unsigned int)largest,
+             (unsigned int)AUDIO_CACHE_DOWNLOAD_HEAP_LARGEST_MIN,
+             audio_url == NULL ? "" : audio_url);
+    return false;
+}
+
+static bool audio_cache_disable_wifi_power_save(wifi_ps_type_t *previous_ps)
+{
+    esp_err_t ret = ESP_OK;
+
+    if (previous_ps == NULL) {
+        return false;
+    }
+
+    ret = esp_wifi_get_ps(previous_ps);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Could not read WiFi power save before audio download: %s", esp_err_to_name(ret));
+        return false;
+    }
+    if (*previous_ps == WIFI_PS_NONE) {
+        return false;
+    }
+
+    ret = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Could not disable WiFi power save for audio download: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "WiFi power save disabled for audio download: previous=%d", (int)*previous_ps);
+    return true;
+}
+
+static void audio_cache_restore_wifi_power_save(wifi_ps_type_t previous_ps, bool should_restore)
+{
+    esp_err_t ret = ESP_OK;
+
+    if (!should_restore) {
+        return;
+    }
+
+    ret = esp_wifi_set_ps(previous_ps);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Could not restore WiFi power save after audio download: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ESP_LOGI(TAG, "WiFi power save restored after audio download: mode=%d", (int)previous_ps);
+}
+
+static void audio_cache_delete_later_cached_items(audio_cache_plan_item_t *items,
+                                                  size_t item_count,
+                                                  size_t current_index,
+                                                  const char *protected_path,
+                                                  audio_cache_maintenance_result_cb_t result_cb,
+                                                  void *result_ctx)
+{
+    size_t index = item_count;
+
+    while (index > (current_index + 1U)) {
+        --index;
+        if (!items[index].cached) {
+            continue;
+        }
+        if ((protected_path != NULL) && (protected_path[0] != '\0') &&
+            (strcmp(items[index].path, protected_path) == 0)) {
+            continue;
+        }
+
+        ESP_LOGI(TAG, "Removing lower priority cached audio %s", items[index].path);
+        if (remove(items[index].path) == 0) {
+            items[index].cached = false;
+            audio_cache_notify_result(result_cb,
+                                      result_ctx,
+                                      items[index].audio_url,
+                                      ESP_ERR_NOT_FOUND,
+                                      "");
+        }
+    }
+}
+
+esp_err_t audio_cache_service_maintain(const audio_cache_maintenance_item_t *items,
+                                       size_t item_count,
+                                       const char *protected_path,
+                                       audio_cache_maintenance_result_cb_t result_cb,
+                                       void *result_ctx)
+{
+    audio_cache_plan_item_t *plan = NULL;
+    const char **keep_paths = NULL;
+    size_t plan_count = 0;
+    size_t index = 0;
+    size_t plan_capacity = 0;
+    esp_err_t final_ret = ESP_OK;
+    bool download_heap_blocked = false;
+
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if ((items == NULL) || (item_count == 0)) {
+        return ESP_OK;
+    }
+    plan_capacity = item_count;
+    plan = calloc(plan_capacity, sizeof(*plan));
+    keep_paths = calloc(plan_capacity, sizeof(*keep_paths));
+    if ((plan == NULL) || (keep_paths == NULL)) {
+        final_ret = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
+
+    for (index = 0; index < item_count; ++index) {
+        char path[AUDIO_CACHE_PATH_MAX] = {0};
+        size_t existing_index = 0;
+
+        if (items[index].audio_url[0] == '\0') {
+            continue;
+        }
+        if (audio_cache_service_resolve_path(NULL,
+                                             items[index].audio_url,
+                                             path,
+                                             sizeof(path)) != ESP_OK) {
+            continue;
+        }
+        if (audio_cache_plan_contains_path(plan, plan_count, path, &existing_index)) {
+            if (items[index].ring_at_epoch < plan[existing_index].ring_at_epoch) {
+                plan[existing_index].ring_at_epoch = items[index].ring_at_epoch;
+            }
+            continue;
+        }
+        if (plan_count >= plan_capacity) {
+            break;
+        }
+
+        snprintf(plan[plan_count].audio_url,
+                 sizeof(plan[plan_count].audio_url),
+                 "%s",
+                 items[index].audio_url);
+        snprintf(plan[plan_count].path, sizeof(plan[plan_count].path), "%s", path);
+        plan[plan_count].ring_at_epoch = items[index].ring_at_epoch;
+        plan[plan_count].cached = audio_cache_service_file_exists(path);
+        ++plan_count;
+    }
+
+    if (plan_count > 1U) {
+        qsort(plan, plan_count, sizeof(plan[0]), audio_cache_plan_compare_ring_time);
+    }
+    for (index = 0; index < plan_count; ++index) {
+        keep_paths[index] = plan[index].path;
+    }
+
+    audio_cache_service_cleanup_unused_with_protected(keep_paths, plan_count, protected_path);
+
+    for (index = 0; index < plan_count; ++index) {
+        char downloaded_path[AUDIO_CACHE_PATH_MAX] = {0};
+        esp_err_t ret = ESP_OK;
+
+        if (audio_cache_service_file_exists(plan[index].path)) {
+            plan[index].cached = true;
+            audio_cache_notify_result(result_cb,
+                                      result_ctx,
+                                      plan[index].audio_url,
+                                      ESP_OK,
+                                      plan[index].path);
+            continue;
+        }
+
+        if (download_heap_blocked || !audio_cache_download_heap_ready(plan[index].audio_url)) {
+            download_heap_blocked = true;
+            audio_cache_notify_result(result_cb,
+                                      result_ctx,
+                                      plan[index].audio_url,
+                                      ESP_ERR_NO_MEM,
+                                      "");
+            continue;
+        }
+
+        ret = audio_cache_service_download(NULL,
+                                           plan[index].audio_url,
+                                           downloaded_path,
+                                           sizeof(downloaded_path));
+        if (ret == ESP_ERR_NO_MEM) {
+            audio_cache_delete_later_cached_items(plan,
+                                                  plan_count,
+                                                  index,
+                                                  protected_path,
+                                                  result_cb,
+                                                  result_ctx);
+            ret = audio_cache_service_download(NULL,
+                                               plan[index].audio_url,
+                                               downloaded_path,
+                                               sizeof(downloaded_path));
+        }
+
+        if ((ret == ESP_OK) && audio_cache_service_file_exists(downloaded_path)) {
+            plan[index].cached = true;
+            audio_cache_notify_result(result_cb,
+                                      result_ctx,
+                                      plan[index].audio_url,
+                                      ESP_OK,
+                                      downloaded_path);
+        } else {
+            audio_cache_notify_result(result_cb,
+                                      result_ctx,
+                                      plan[index].audio_url,
+                                      ret,
+                                      "");
+        }
+    }
+
+cleanup:
+    free(keep_paths);
+    free(plan);
+    return final_ret;
 }

@@ -14,7 +14,7 @@
 #include "network_task_service.h"
 #include "time_service.h"
 
-#define WEATHER_DEVICE_TASK_STACK_SIZE             4096
+#define WEATHER_DEVICE_TASK_STACK_SIZE             3072
 #define WEATHER_DEVICE_TASK_PRIORITY               4
 #define WEATHER_DEVICE_TIME_WAIT_MS                5000
 #define WEATHER_DEVICE_TIME_LOG_MS                 30000
@@ -33,6 +33,7 @@ static EventGroupHandle_t s_connected_event_group;
 static EventBits_t s_connected_bit;
 static TaskHandle_t s_task_handle;
 static uint32_t s_last_cloud_generation;
+static bool s_network_handler_registered;
 
 static void weather_device_copy_text(char *destination, size_t destination_size, const char *source)
 {
@@ -344,6 +345,9 @@ static void weather_device_provider_task(void *arg)
     time_t next_refresh_epoch = 0;
 
     (void)arg;
+    ESP_LOGI(TAG,
+             "weather_device stack_free=%u bytes",
+             (unsigned int)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
 
     while (true) {
         device_cloud_config_t config = {0};
@@ -383,7 +387,7 @@ static void weather_device_provider_task(void *arg)
                      (unsigned int)WEATHER_DEVICE_INITIAL_DELAY_SECONDS);
         }
         if (refresh_requested || (next_refresh_epoch == 0) || (now >= next_refresh_epoch)) {
-            network_task_service_request_weather_refresh();
+            network_task_service_request_weather_refresh(NETWORK_TASK_WEATHER_REASON_NORMAL);
             failure_count = 0;
             next_refresh_epoch = time(NULL) + (time_t)weather_device_next_retry_seconds(failure_count, &config);
             refresh_requested = false;
@@ -418,6 +422,7 @@ esp_err_t weather_device_service_provider_start(EventGroupHandle_t connected_eve
                                                 EventBits_t connected_bit)
 {
     BaseType_t task_created = pdFAIL;
+    esp_err_t ret = ESP_OK;
 
     if ((connected_event_group == NULL) || (connected_bit == 0)) {
         return ESP_ERR_INVALID_ARG;
@@ -431,8 +436,10 @@ esp_err_t weather_device_service_provider_start(EventGroupHandle_t connected_eve
     s_connected_event_group = connected_event_group;
     s_connected_bit = connected_bit;
     s_last_cloud_generation = device_cloud_service_get_generation();
-    weather_device_publish_simple_state(WEATHER_DATA_STATE_LOADING);
-    network_task_service_register_weather_handler(weather_device_network_result, NULL);
+    ret = weather_device_service_provider_prepare();
+    if (ret != ESP_OK) {
+        return ret;
+    }
 
     task_created = xTaskCreate(weather_device_provider_task,
                                "weather_device",
@@ -445,6 +452,18 @@ esp_err_t weather_device_service_provider_start(EventGroupHandle_t connected_eve
         return ESP_ERR_NO_MEM;
     }
 
+    return ESP_OK;
+}
+
+esp_err_t weather_device_service_provider_prepare(void)
+{
+    if (!s_network_handler_registered) {
+        network_task_service_register_weather_handler(weather_device_network_result, NULL);
+        s_network_handler_registered = true;
+    }
+    if (!s_has_snapshot) {
+        weather_device_publish_simple_state(WEATHER_DATA_STATE_LOADING);
+    }
     return ESP_OK;
 }
 

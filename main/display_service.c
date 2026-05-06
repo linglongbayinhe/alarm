@@ -5,12 +5,12 @@
 #include <string.h>
 
 #include "display_lvgl.h"
+#include "display_lvgl_port_cfg.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "display_config.h"
 #include "display_status_icon_renderer.h"
 #include "display_weather_icon_renderer.h"
-#include "esp_heap_caps.h"
 #include "esp_check.h"
 #include "esp_lcd_io_spi.h"
 #include "esp_lcd_panel_io.h"
@@ -19,8 +19,6 @@
 #include "esp_lcd_panel_vendor.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 
 static const char *TAG = "DISPLAY_SERVICE";
 static const char *DATE_PLACEHOLDER = "----.--.--";
@@ -39,7 +37,6 @@ static const char *DISPLAY_SPIFFS_PARTITION_LABEL = NULL;
 #define DISPLAY_WEATHER_ROW_TWO_REGION_INDEX 3
 #define DISPLAY_DATE_SCALE 1
 #define DISPLAY_TIME_SCALE 5
-#define DISPLAY_DMA_WAIT_TIMEOUT_MS 1000
 #define DISPLAY_COLOR_WHITE 0xFFFF
 #define DISPLAY_COLOR_BLACK 0x0000
 #define DISPLAY_STATUS_TEXT_BUFFER_SIZE 48
@@ -130,7 +127,6 @@ static bool s_use_log_backend;
 static bool s_backend_warning_logged;
 static bool s_has_cached_view;
 static uint16_t *s_line_buffer;
-static SemaphoreHandle_t s_flush_done_sem;
 static esp_lcd_panel_io_handle_t s_panel_io;
 static esp_lcd_panel_handle_t s_panel;
 static display_wifi_status_icon_t s_last_top_right_icon;
@@ -138,24 +134,6 @@ static bool s_last_weather_visible;
 static weather_icon_kind_t s_last_weather_icon;
 static bool s_last_time_valid;
 static struct tm s_last_time;
-
-/* Releases the shared line buffer once the asynchronous SPI color transfer completes. */
-static bool display_flush_ready_from_isr(esp_lcd_panel_io_handle_t panel_io,
-                                         esp_lcd_panel_io_event_data_t *edata,
-                                         void *user_ctx)
-{
-    BaseType_t task_woken = pdFALSE;
-    SemaphoreHandle_t flush_done_sem = (SemaphoreHandle_t)user_ctx;
-
-    (void)panel_io;
-    (void)edata;
-
-    if (flush_done_sem != NULL) {
-        xSemaphoreGiveFromISR(flush_done_sem, &task_woken);
-    }
-
-    return task_woken == pdTRUE;
-}
 
 /* Maps a supported character to the built-in bitmap glyph table. */
 static const display_glyph_t *display_find_glyph(char ascii)
@@ -173,37 +151,14 @@ static const display_glyph_t *display_find_glyph(char ascii)
 
 static esp_err_t display_push_line_buffer(int line_index);
 
-static void display_release_legacy_line_buffer(void)
-{
-    if (s_line_buffer != NULL) {
-        heap_caps_free(s_line_buffer);
-        s_line_buffer = NULL;
-        ESP_LOGI(TAG, "Released legacy LCD line buffer after LVGL init");
-    }
-}
-
-/* Queues one LCD transfer and blocks until the driver signals that DMA has finished. */
+/* Legacy strip renderer helper. Normal firmware uses LVGL, which owns panel IO callbacks. */
 static esp_err_t display_draw_bitmap_sync(int x_start, int y_start, int x_end, int y_end)
 {
-    esp_err_t ret = ESP_OK;
-
-    if (s_flush_done_sem == NULL) {
+    if (s_line_buffer == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    xSemaphoreTake(s_flush_done_sem, 0);
-
-    ret = esp_lcd_panel_draw_bitmap(s_panel, x_start, y_start, x_end, y_end, s_line_buffer);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    if (xSemaphoreTake(s_flush_done_sem, pdMS_TO_TICKS(DISPLAY_DMA_WAIT_TIMEOUT_MS)) != pdTRUE) {
-        ESP_LOGE(TAG, "Timed out waiting for LCD DMA flush");
-        return ESP_ERR_TIMEOUT;
-    }
-
-    return ESP_OK;
+    return esp_lcd_panel_draw_bitmap(s_panel, x_start, y_start, x_end, y_end, s_line_buffer);
 }
 
 /* Copies one formatted line into a fixed-size destination buffer. */
@@ -577,46 +532,17 @@ static esp_err_t display_render_line_region(int line_index, const char *text, in
     return display_push_line_buffer(line_index);
 }
 
-/* Clears all line regions during display startup. */
-static esp_err_t display_clear_screen(void)
-{
-    int y_start = 0;
-    int segment_height = 0;
-    esp_err_t ret = ESP_OK;
-
-    display_buffer_fill(DISPLAY_COLOR_BLACK);
-    for (y_start = 0; y_start < DISPLAY_HEIGHT; y_start += DISPLAY_LINE_HEIGHT) {
-        segment_height = DISPLAY_HEIGHT - y_start;
-        if (segment_height > DISPLAY_LINE_HEIGHT) {
-            segment_height = DISPLAY_LINE_HEIGHT;
-        }
-
-        ret = display_draw_bitmap_sync(0,
-                                       y_start,
-                                       DISPLAY_WIDTH,
-                                       y_start + segment_height);
-        if (ret != ESP_OK) {
-            return ret;
-        }
-    }
-
-    return ESP_OK;
-}
-
 /* Configures SPI, panel IO and ST7789 using the project-local wiring. */
 static esp_err_t display_init_hardware(void)
 {
     esp_err_t ret = ESP_OK;
-    esp_lcd_panel_io_callbacks_t panel_io_callbacks = {
-        .on_color_trans_done = display_flush_ready_from_isr,
-    };
     spi_bus_config_t bus_config = {
         .sclk_io_num = DISPLAY_PIN_SCLK,
         .mosi_io_num = DISPLAY_PIN_MOSI,
         .miso_io_num = GPIO_NUM_NC,
         .quadwp_io_num = GPIO_NUM_NC,
         .quadhd_io_num = GPIO_NUM_NC,
-        .max_transfer_sz = DISPLAY_LINE_BUFFER_PIXELS * sizeof(uint16_t),
+        .max_transfer_sz = DISPLAY_LVGL_PORT_BUFFER_PIXELS * sizeof(uint16_t),
     };
     esp_lcd_panel_io_spi_config_t io_config = {
         .cs_gpio_num = DISPLAY_PIN_CS,
@@ -646,21 +572,6 @@ static esp_err_t display_init_hardware(void)
         .mode = GPIO_MODE_OUTPUT,
     };
 
-    if (s_flush_done_sem == NULL) {
-        s_flush_done_sem = xSemaphoreCreateBinary();
-        if (s_flush_done_sem == NULL) {
-            ESP_LOGE(TAG, "Failed to create LCD flush semaphore");
-            return ESP_ERR_NO_MEM;
-        }
-    }
-
-    s_line_buffer = heap_caps_malloc(DISPLAY_LINE_BUFFER_PIXELS * sizeof(uint16_t),
-                                     MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (s_line_buffer == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate LCD line buffer");
-        return ESP_ERR_NO_MEM;
-    }
-
     ESP_RETURN_ON_ERROR(gpio_config(&backlight_config), TAG, "Backlight GPIO init failed");
     gpio_set_level(DISPLAY_PIN_BACKLIGHT, !DISPLAY_BACKLIGHT_ON_LEVEL);
 
@@ -673,11 +584,6 @@ static esp_err_t display_init_hardware(void)
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_spi(DISPLAY_SPI_HOST, &io_config, &s_panel_io),
                         TAG,
                         "Panel IO init failed");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_io_register_event_callbacks(s_panel_io,
-                                                                  &panel_io_callbacks,
-                                                                  s_flush_done_sem),
-                        TAG,
-                        "Panel IO callback registration failed");
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_st7789(s_panel_io, &panel_config, &s_panel),
                         TAG,
                         "ST7789 panel init failed");
@@ -695,7 +601,6 @@ static esp_err_t display_init_hardware(void)
 #endif
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel, true), TAG, "Panel display on failed");
 
-    ESP_RETURN_ON_ERROR(display_clear_screen(), TAG, "Panel clear failed");
     gpio_set_level(DISPLAY_PIN_BACKLIGHT, DISPLAY_BACKLIGHT_ON_LEVEL);
 
     ESP_LOGI(TAG,
@@ -728,10 +633,9 @@ esp_err_t display_service_init(void)
     } else {
         esp_err_t lvgl_ret = display_lvgl_init(s_panel_io, s_panel);
         if (lvgl_ret != ESP_OK) {
-            ESP_LOGW(TAG, "LVGL port init failed: %s (legacy strip renderer still active)",
+            s_use_log_backend = true;
+            ESP_LOGW(TAG, "LVGL port init failed: %s; fallback to log renderer",
                      esp_err_to_name(lvgl_ret));
-        } else {
-            display_release_legacy_line_buffer();
         }
     }
 
