@@ -699,6 +699,15 @@ static esp_err_t playback_task_apply_cloud_response(const char *json,
             cJSON_IsString(audio_url) &&
             (audio_url->valuestring != NULL) &&
             (audio_url->valuestring[0] != '\0')) {
+            if (strlen(audio_url->valuestring) >= sizeof(cache_items[*cache_item_count].audio_url)) {
+                ESP_LOGW(TAG,
+                         "Skipping audio download: audioUrl too long len=%u max=%u instance=%s",
+                         (unsigned int)strlen(audio_url->valuestring),
+                         (unsigned int)(sizeof(cache_items[*cache_item_count].audio_url) - 1U),
+                         parsed_task.instance_id);
+                new_tasks[new_task_count++] = parsed_task;
+                continue;
+            }
             playback_task_copy_string(cache_items[*cache_item_count].audio_url,
                                       sizeof(cache_items[*cache_item_count].audio_url),
                                       audio_url->valuestring);

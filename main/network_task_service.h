@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "audio_cache_service.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -35,7 +36,7 @@ typedef enum {
 } network_task_weather_reason_t;
 
 typedef struct {
-    char audio_url[256];
+    char audio_url[AUDIO_CACHE_URL_SIZE];
     int64_t ring_at_epoch;
 } network_task_audio_cache_item_t;
 

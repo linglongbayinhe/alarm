@@ -8,7 +8,7 @@
 #include "esp_err.h"
 
 #define AUDIO_CACHE_PATH_MAX 160
-#define AUDIO_CACHE_URL_SIZE 256
+#define AUDIO_CACHE_URL_SIZE 512
 
 typedef struct {
     char audio_url[AUDIO_CACHE_URL_SIZE];

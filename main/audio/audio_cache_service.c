@@ -15,6 +15,8 @@
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "storage_service.h"
 
 #if !defined(CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY) || !CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY
@@ -28,12 +30,29 @@ static const char *TAG = "AUDIO_CACHE";
 #define AUDIO_CACHE_DOWNLOAD_MARGIN_BYTES 4096
 #define AUDIO_CACHE_DOWNLOAD_HEAP_FREE_MIN 50000
 #define AUDIO_CACHE_DOWNLOAD_HEAP_LARGEST_MIN 24000
+#define AUDIO_CACHE_DOWNLOAD_MAX_ATTEMPTS 3
+#define AUDIO_CACHE_DOWNLOAD_RETRY_DELAY_MS 500
+#define AUDIO_CACHE_HTTP_RX_BUFFER_SIZE 2048
+#define AUDIO_CACHE_HTTP_TX_BUFFER_SIZE 1024
+#define AUDIO_CACHE_REDIRECT_MAX_COUNT 3
+#define AUDIO_CACHE_REDIRECT_URL_SIZE 1536
 
 static bool s_ready;
 
 static bool audio_cache_download_heap_ready(const char *audio_url);
 static bool audio_cache_disable_wifi_power_save(wifi_ps_type_t *previous_ps);
 static void audio_cache_restore_wifi_power_save(wifi_ps_type_t previous_ps, bool should_restore);
+static bool audio_cache_is_redirect_status(int status_code);
+static esp_err_t audio_cache_http_event_handler(esp_http_client_event_t *event);
+static esp_err_t audio_cache_download_once(const char *audio_url,
+                                           const char *final_path,
+                                           const char *temp_path,
+                                           int attempt);
+
+typedef struct {
+    char *location;
+    size_t location_size;
+} audio_cache_http_context_t;
 
 typedef struct {
     char audio_url[AUDIO_CACHE_URL_SIZE];
@@ -205,53 +224,80 @@ bool audio_cache_service_find_existing(const char *instance_id,
     return true;
 }
 
-esp_err_t audio_cache_service_download(const char *instance_id,
-                                       const char *audio_url,
-                                       char *path_buffer,
-                                       size_t path_buffer_size)
+static bool audio_cache_is_redirect_status(int status_code)
 {
-    char final_path[AUDIO_CACHE_PATH_MAX] = {0};
-    char temp_path[AUDIO_CACHE_PATH_MAX] = {0};
-    esp_http_client_config_t client_config = {0};
-    esp_http_client_handle_t client = NULL;
-    FILE *file = NULL;
-    uint8_t *download_buffer = NULL;
-    esp_err_t ret = ESP_OK;
-    size_t bytes_written_total = 0;
-    wifi_ps_type_t previous_wifi_ps = WIFI_PS_NONE;
-    bool restore_wifi_ps = false;
+    return (status_code == 301) ||
+           (status_code == 302) ||
+           (status_code == 303) ||
+           (status_code == 307) ||
+           (status_code == 308);
+}
 
-    if ((audio_url == NULL) || (audio_url[0] == '\0')) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (!s_ready) {
-        return ESP_ERR_INVALID_STATE;
-    }
+static esp_err_t audio_cache_http_event_handler(esp_http_client_event_t *event)
+{
+    audio_cache_http_context_t *context = NULL;
 
-    ret = audio_cache_service_resolve_path(instance_id, audio_url, final_path, sizeof(final_path));
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    if ((path_buffer != NULL) && (path_buffer_size > 0)) {
-        snprintf(path_buffer, path_buffer_size, "%s", final_path);
-    }
-
-    if (audio_cache_service_file_exists(final_path)) {
-        ESP_LOGI(TAG, "Cache hit: path=%s url=%s", final_path, audio_url);
+    if ((event == NULL) || (event->event_id != HTTP_EVENT_ON_HEADER)) {
         return ESP_OK;
     }
 
-    if (snprintf(temp_path, sizeof(temp_path), "%s.part", final_path) >= (int)sizeof(temp_path)) {
-        return ESP_ERR_INVALID_SIZE;
+    context = (audio_cache_http_context_t *)event->user_data;
+    if ((context == NULL) ||
+        (context->location == NULL) ||
+        (context->location_size == 0) ||
+        (event->header_key == NULL) ||
+        (event->header_value == NULL)) {
+        return ESP_OK;
     }
-    if (!audio_cache_download_heap_ready(audio_url)) {
+
+    if (strcasecmp(event->header_key, "Location") == 0) {
+        snprintf(context->location, context->location_size, "%s", event->header_value);
+    }
+
+    return ESP_OK;
+}
+
+static esp_err_t audio_cache_download_once(const char *audio_url,
+                                           const char *final_path,
+                                           const char *temp_path,
+                                           int attempt)
+{
+    esp_http_client_config_t client_config = {0};
+    esp_http_client_handle_t client = NULL;
+    FILE *file = NULL;
+    char *redirect_url = NULL;
+    char *current_url = NULL;
+    audio_cache_http_context_t http_context = {0};
+    const char *request_url = audio_url;
+    uint8_t *download_buffer = NULL;
+    esp_err_t ret = ESP_OK;
+    size_t bytes_written_total = 0;
+    int redirect_count = 0;
+
+    redirect_url = calloc(1, AUDIO_CACHE_REDIRECT_URL_SIZE);
+    if (redirect_url == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    restore_wifi_ps = audio_cache_disable_wifi_power_save(&previous_wifi_ps);
+    current_url = calloc(1, AUDIO_CACHE_REDIRECT_URL_SIZE);
+    if (current_url == NULL) {
+        free(redirect_url);
+        return ESP_ERR_NO_MEM;
+    }
 
-    client_config.url = audio_url;
+redirect:
+    memset(&client_config, 0, sizeof(client_config));
+    redirect_url[0] = '\0';
+    http_context.location = redirect_url;
+    http_context.location_size = AUDIO_CACHE_REDIRECT_URL_SIZE;
+    client_config.url = request_url;
     client_config.method = HTTP_METHOD_GET;
     client_config.timeout_ms = AUDIO_CACHE_HTTP_TIMEOUT_MS;
+    client_config.buffer_size = AUDIO_CACHE_HTTP_RX_BUFFER_SIZE;
+    client_config.buffer_size_tx = AUDIO_CACHE_HTTP_TX_BUFFER_SIZE;
+    client_config.disable_auto_redirect = false;
+    client_config.max_redirection_count = AUDIO_CACHE_REDIRECT_MAX_COUNT;
+    client_config.event_handler = audio_cache_http_event_handler;
+    client_config.user_data = &http_context;
 #if defined(CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY) && CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY
     client_config.skip_cert_common_name_check = true;
 #else
@@ -260,32 +306,40 @@ esp_err_t audio_cache_service_download(const char *instance_id,
 
     client = esp_http_client_init(&client_config);
     if (client == NULL) {
-        return ESP_FAIL;
+        ret = ESP_FAIL;
+        goto cleanup;
     }
     (void)esp_http_client_set_header(client, "User-Agent", "ESP32-Alarm/1.0");
     (void)esp_http_client_set_header(client, "Accept", "audio/mpeg,*/*");
     (void)esp_http_client_set_header(client, "Accept-Encoding", "identity");
     (void)esp_http_client_set_header(client, "Connection", "close");
 
-    ESP_LOGI(TAG, "Download start: url=%s path=%s", audio_url, final_path);
+    ESP_LOGI(TAG,
+             "Download attempt %d start: url=%s path=%s",
+             attempt,
+             request_url,
+             final_path);
     errno = 0;
     ret = esp_http_client_open(client, 0);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG,
-                 "Open download failed: %s errno=%d(%s)",
+                 "Open download failed: attempt=%d ret=%s errno=%d(%s)",
+                 attempt,
                  esp_err_to_name(ret),
                  errno,
                  strerror(errno));
         goto cleanup;
     }
-    ESP_LOGI(TAG, "Download connection opened: path=%s", final_path);
+    ESP_LOGI(TAG, "Download connection opened: attempt=%d path=%s", attempt, final_path);
 
     {
         errno = 0;
         int64_t header_len = esp_http_client_fetch_headers(client);
         if (header_len < 0) {
             ESP_LOGE(TAG,
-                     "Fetch download headers failed: header_len=%" PRId64 " status=%d errno=%d(%s) path=%s",
+                     "Fetch download headers failed: attempt=%d header_len=%" PRId64
+                     " status=%d errno=%d(%s) path=%s",
+                     attempt,
                      header_len,
                      esp_http_client_get_status_code(client),
                      errno,
@@ -295,9 +349,66 @@ esp_err_t audio_cache_service_download(const char *instance_id,
             goto cleanup;
         }
     }
+    {
+        int status_code = esp_http_client_get_status_code(client);
+        if (audio_cache_is_redirect_status(status_code)) {
+            if (redirect_count >= AUDIO_CACHE_REDIRECT_MAX_COUNT) {
+                ESP_LOGE(TAG,
+                         "Download redirect limit reached: attempt=%d status=%d url=%s",
+                         attempt,
+                         status_code,
+                         request_url);
+                ret = ESP_ERR_HTTP_MAX_REDIRECT;
+                goto cleanup;
+            }
+            if (redirect_url[0] == '\0') {
+                ESP_LOGE(TAG,
+                         "Download redirect missing Location: attempt=%d status=%d url=%s",
+                         attempt,
+                         status_code,
+                         request_url);
+                ret = ESP_FAIL;
+                goto cleanup;
+            }
+            if ((strncmp(redirect_url, "https://", 8) != 0) &&
+                (strncmp(redirect_url, "http://", 7) != 0)) {
+                ESP_LOGE(TAG,
+                         "Download redirect Location is not absolute: attempt=%d status=%d location=%s",
+                         attempt,
+                         status_code,
+                         redirect_url);
+                ret = ESP_ERR_INVALID_RESPONSE;
+                goto cleanup;
+            }
+
+            ESP_LOGI(TAG,
+                     "Download redirect: attempt=%d status=%d location=%s",
+                     attempt,
+                     status_code,
+                     redirect_url);
+            if (snprintf(current_url, AUDIO_CACHE_REDIRECT_URL_SIZE, "%s", redirect_url) >=
+                AUDIO_CACHE_REDIRECT_URL_SIZE) {
+                ESP_LOGE(TAG,
+                         "Download redirect Location too long: attempt=%d status=%d max=%u",
+                         attempt,
+                         status_code,
+                         (unsigned int)(AUDIO_CACHE_REDIRECT_URL_SIZE - 1U));
+                ret = ESP_ERR_INVALID_SIZE;
+                goto cleanup;
+            }
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            client = NULL;
+            request_url = current_url;
+            ++redirect_count;
+            goto redirect;
+        }
+    }
+
     if (esp_http_client_get_status_code(client) / 100 != 2) {
         ESP_LOGE(TAG,
-                 "Download HTTP status rejected: status=%d path=%s",
+                 "Download HTTP status rejected: attempt=%d status=%d path=%s",
+                 attempt,
                  esp_http_client_get_status_code(client),
                  final_path);
         ret = ESP_FAIL;
@@ -305,8 +416,25 @@ esp_err_t audio_cache_service_download(const char *instance_id,
     }
     {
         int64_t content_length = esp_http_client_get_content_length(client);
+        char *content_type = NULL;
+
+        if (esp_http_client_get_header(client, "Content-Type", &content_type) == ESP_OK) {
+            ESP_LOGI(TAG,
+                     "Download content type: attempt=%d type=%s path=%s",
+                     attempt,
+                     content_type,
+                     final_path);
+            if ((content_type != NULL) && (strstr(content_type, "audio/mpeg") == NULL)) {
+                ESP_LOGW(TAG,
+                         "Unexpected audio content type: %s path=%s",
+                         content_type,
+                         final_path);
+            }
+        }
+
         ESP_LOGI(TAG,
-                 "Download headers: status=%d content_length=%" PRId64 " path=%s",
+                 "Download headers: attempt=%d status=%d content_length=%" PRId64 " path=%s",
+                 attempt,
                  esp_http_client_get_status_code(client),
                  content_length,
                  final_path);
@@ -345,7 +473,8 @@ esp_err_t audio_cache_service_download(const char *instance_id,
                                               AUDIO_CACHE_DOWNLOAD_BUFFER_SIZE);
         if (bytes_read < 0) {
             ESP_LOGE(TAG,
-                     "Read download body failed: bytes=%d written=%u errno=%d(%s) path=%s",
+                     "Read download body failed: attempt=%d bytes=%d written=%u errno=%d(%s) path=%s",
+                     attempt,
                      bytes_read,
                      (unsigned int)bytes_written_total,
                      errno,
@@ -360,7 +489,8 @@ esp_err_t audio_cache_service_download(const char *instance_id,
         errno = 0;
         if (fwrite(download_buffer, 1, (size_t)bytes_read, file) != (size_t)bytes_read) {
             ESP_LOGE(TAG,
-                     "Write download file failed: bytes=%d written=%u errno=%d(%s) path=%s",
+                     "Write download file failed: attempt=%d bytes=%d written=%u errno=%d(%s) path=%s",
+                     attempt,
                      bytes_read,
                      (unsigned int)bytes_written_total,
                      errno,
@@ -381,11 +511,9 @@ esp_err_t audio_cache_service_download(const char *instance_id,
         goto cleanup;
     }
 
-    if ((path_buffer != NULL) && (path_buffer_size > 0)) {
-        snprintf(path_buffer, path_buffer_size, "%s", final_path);
-    }
     ESP_LOGI(TAG,
-             "Download finished: path=%s bytes=%u url=%s",
+             "Download finished: attempt=%d path=%s bytes=%u url=%s",
+             attempt,
              final_path,
              (unsigned int)bytes_written_total,
              audio_url);
@@ -396,17 +524,86 @@ cleanup:
     }
     if (ret != ESP_OK) {
         remove(temp_path);
-        ESP_LOGW(TAG,
-                 "Download failed: path=%s ret=%s url=%s",
-                 final_path,
-                 esp_err_to_name(ret),
-                 audio_url);
     }
+    free(download_buffer);
+    free(redirect_url);
+    free(current_url);
     if (client != NULL) {
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
     }
-    free(download_buffer);
+
+    return ret;
+}
+
+esp_err_t audio_cache_service_download(const char *instance_id,
+                                       const char *audio_url,
+                                       char *path_buffer,
+                                       size_t path_buffer_size)
+{
+    char final_path[AUDIO_CACHE_PATH_MAX] = {0};
+    char temp_path[AUDIO_CACHE_PATH_MAX] = {0};
+    esp_err_t ret = ESP_OK;
+    wifi_ps_type_t previous_wifi_ps = WIFI_PS_NONE;
+    bool restore_wifi_ps = false;
+    int attempt = 0;
+
+    if ((audio_url == NULL) || (audio_url[0] == '\0')) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ret = audio_cache_service_resolve_path(instance_id, audio_url, final_path, sizeof(final_path));
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    if ((path_buffer != NULL) && (path_buffer_size > 0)) {
+        snprintf(path_buffer, path_buffer_size, "%s", final_path);
+    }
+
+    if (audio_cache_service_file_exists(final_path)) {
+        ESP_LOGI(TAG, "Cache hit: path=%s url=%s", final_path, audio_url);
+        return ESP_OK;
+    }
+
+    if (snprintf(temp_path, sizeof(temp_path), "%s.part", final_path) >= (int)sizeof(temp_path)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (!audio_cache_download_heap_ready(audio_url)) {
+        return ESP_ERR_NO_MEM;
+    }
+    restore_wifi_ps = audio_cache_disable_wifi_power_save(&previous_wifi_ps);
+
+    for (attempt = 1; attempt <= AUDIO_CACHE_DOWNLOAD_MAX_ATTEMPTS; ++attempt) {
+        ret = audio_cache_download_once(audio_url, final_path, temp_path, attempt);
+        if (ret == ESP_OK) {
+            break;
+        }
+        if ((ret == ESP_ERR_NO_MEM) || (attempt >= AUDIO_CACHE_DOWNLOAD_MAX_ATTEMPTS)) {
+            break;
+        }
+        ESP_LOGW(TAG,
+                 "Download attempt %d failed: ret=%s; retrying in %u ms path=%s",
+                 attempt,
+                 esp_err_to_name(ret),
+                 (unsigned int)AUDIO_CACHE_DOWNLOAD_RETRY_DELAY_MS,
+                 final_path);
+        vTaskDelay(pdMS_TO_TICKS(AUDIO_CACHE_DOWNLOAD_RETRY_DELAY_MS));
+    }
+
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "Download failed: attempts=%d path=%s ret=%s url=%s",
+                 attempt > AUDIO_CACHE_DOWNLOAD_MAX_ATTEMPTS ? AUDIO_CACHE_DOWNLOAD_MAX_ATTEMPTS : attempt,
+                 final_path,
+                 esp_err_to_name(ret),
+                 audio_url);
+    } else if ((path_buffer != NULL) && (path_buffer_size > 0)) {
+        snprintf(path_buffer, path_buffer_size, "%s", final_path);
+    }
+
     audio_cache_restore_wifi_power_save(previous_wifi_ps, restore_wifi_ps);
 
     return ret;
