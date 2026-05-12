@@ -11,11 +11,11 @@
 #define AUDIO_CACHE_URL_SIZE 512
 
 typedef struct {
-    char audio_url[AUDIO_CACHE_URL_SIZE];
+    char download_url[AUDIO_CACHE_URL_SIZE];
     int64_t ring_at_epoch;
 } audio_cache_maintenance_item_t;
 
-typedef void (*audio_cache_maintenance_result_cb_t)(const char *audio_url,
+typedef void (*audio_cache_maintenance_result_cb_t)(const char *download_url,
                                                     esp_err_t ret,
                                                     const char *local_path,
                                                     void *ctx);
@@ -23,17 +23,17 @@ typedef void (*audio_cache_maintenance_result_cb_t)(const char *audio_url,
 esp_err_t audio_cache_service_init(void);
 bool audio_cache_service_is_ready(void);
 bool audio_cache_service_file_exists(const char *path);
-uint32_t audio_cache_service_hash_url(const char *audio_url);
+uint32_t audio_cache_service_hash_url(const char *download_url);
 esp_err_t audio_cache_service_resolve_path(const char *instance_id,
-                                           const char *audio_url,
+                                           const char *download_url,
                                            char *path_buffer,
                                            size_t path_buffer_size);
 bool audio_cache_service_find_existing(const char *instance_id,
-                                       const char *audio_url,
+                                       const char *download_url,
                                        char *path_buffer,
                                        size_t path_buffer_size);
 esp_err_t audio_cache_service_download(const char *instance_id,
-                                       const char *audio_url,
+                                       const char *download_url,
                                        char *path_buffer,
                                        size_t path_buffer_size);
 esp_err_t audio_cache_service_cleanup_unused(const char *const *keep_paths, size_t keep_path_count);

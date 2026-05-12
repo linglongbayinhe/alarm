@@ -1,5 +1,6 @@
 #include "storage_service.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
@@ -47,11 +48,70 @@ static esp_err_t storage_service_ensure_directory(const char *path)
         if ((info.st_mode & S_IFDIR) != 0) {
             return ESP_OK;
         }
+        ESP_LOGE(TAG, "Path exists but is not a directory: path=%s", path);
         return ESP_ERR_INVALID_STATE;
     }
 
+    errno = 0;
     if (mkdir(path, 0775) != 0) {
+        ESP_LOGE(TAG,
+                 "mkdir failed: path=%s errno=%d(%s)",
+                 path,
+                 errno,
+                 strerror(errno));
         return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+static esp_err_t storage_service_unmount_external_fatfs(void)
+{
+    esp_err_t ret = ESP_OK;
+
+    if (s_external_wl_handle == WL_INVALID_HANDLE) {
+        return ESP_OK;
+    }
+
+    ret = esp_vfs_fat_spiflash_unmount_rw_wl(STORAGE_SERVICE_EXTERNAL_BASE_PATH,
+                                             s_external_wl_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to unmount external FATFS: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    s_external_wl_handle = WL_INVALID_HANDLE;
+    return ESP_OK;
+}
+
+static esp_err_t storage_service_mount_external_fatfs(const esp_vfs_fat_mount_config_t *mount_config)
+{
+    return esp_vfs_fat_spiflash_mount_rw_wl(STORAGE_SERVICE_EXTERNAL_BASE_PATH,
+                                            EXT_FLASH_PARTITION_LABEL,
+                                            mount_config,
+                                            &s_external_wl_handle);
+}
+
+static esp_err_t storage_service_format_external_fatfs(const esp_vfs_fat_mount_config_t *mount_config)
+{
+    esp_err_t ret = ESP_OK;
+
+    ret = storage_service_unmount_external_fatfs();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ESP_LOGW(TAG, "Erasing external FAT partition and formatting cache");
+    ret = esp_partition_erase_range(s_external_partition, 0, s_external_partition->size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to erase external FAT partition: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = storage_service_mount_external_fatfs(mount_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to mount external FATFS after erase retry: %s", esp_err_to_name(ret));
+        return ret;
     }
 
     return ESP_OK;
@@ -194,33 +254,30 @@ static esp_err_t storage_service_init_external_flash(void)
         return ESP_ERR_NOT_FOUND;
     }
 
-    ret = esp_vfs_fat_spiflash_mount_rw_wl(STORAGE_SERVICE_EXTERNAL_BASE_PATH,
-                                           EXT_FLASH_PARTITION_LABEL,
-                                           &mount_config,
-                                           &s_external_wl_handle);
+    ret = storage_service_mount_external_fatfs(&mount_config);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Initial external FATFS mount failed: %s; erasing partition and retrying",
                  esp_err_to_name(ret));
-        ret = esp_partition_erase_range(s_external_partition, 0, s_external_partition->size);
+        ret = storage_service_format_external_fatfs(&mount_config);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to erase external FAT partition: %s", esp_err_to_name(ret));
-            return ret;
-        }
-
-        ret = esp_vfs_fat_spiflash_mount_rw_wl(STORAGE_SERVICE_EXTERNAL_BASE_PATH,
-                                               EXT_FLASH_PARTITION_LABEL,
-                                               &mount_config,
-                                               &s_external_wl_handle);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to mount external FATFS after erase retry: %s", esp_err_to_name(ret));
             return ret;
         }
     }
 
     ret = storage_service_ensure_directory(STORAGE_SERVICE_EXTERNAL_AUDIO_DIR);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create audio cache dir: %s", esp_err_to_name(ret));
-        return ret;
+        ESP_LOGW(TAG,
+                 "Audio cache dir is unavailable after mount: %s; reformatting external cache once",
+                 esp_err_to_name(ret));
+        ret = storage_service_format_external_fatfs(&mount_config);
+        if (ret != ESP_OK) {
+            return ret;
+        }
+        ret = storage_service_ensure_directory(STORAGE_SERVICE_EXTERNAL_AUDIO_DIR);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to create audio cache dir after format retry: %s", esp_err_to_name(ret));
+            return ret;
+        }
     }
 
     ESP_LOGI(TAG, "External flash mounted at %s size=%" PRIu32 " KB",

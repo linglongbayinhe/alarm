@@ -463,7 +463,7 @@ static esp_err_t playback_task_parse_remote_object(const cJSON *task_object,
     const cJSON *alarm_id = NULL;
     const cJSON *ring_at = NULL;
     const cJSON *title = NULL;
-    const cJSON *audio_url = NULL;
+    const cJSON *audio_download_url = NULL;
     const cJSON *fallback_mode = NULL;
     const cJSON *status = NULL;
     int64_t ring_at_epoch = 0;
@@ -490,7 +490,7 @@ static esp_err_t playback_task_parse_remote_object(const cJSON *task_object,
 
     alarm_id = cJSON_GetObjectItemCaseSensitive(task_object, "alarmId");
     title = cJSON_GetObjectItemCaseSensitive(task_object, "title");
-    audio_url = cJSON_GetObjectItemCaseSensitive(task_object, "audioUrl");
+    audio_download_url = cJSON_GetObjectItemCaseSensitive(task_object, "audioDownloadUrl");
     fallback_mode = cJSON_GetObjectItemCaseSensitive(task_object, "fallbackMode");
     status = cJSON_GetObjectItemCaseSensitive(task_object, "status");
 
@@ -500,15 +500,22 @@ static esp_err_t playback_task_parse_remote_object(const cJSON *task_object,
     if (cJSON_IsString(title) && (title->valuestring != NULL)) {
         playback_task_copy_string(task->title, sizeof(task->title), title->valuestring);
     }
-    if (cJSON_IsString(audio_url) && (audio_url->valuestring != NULL) && (audio_url->valuestring[0] != '\0')) {
-        task->audio_hash = audio_cache_service_hash_url(audio_url->valuestring);
+    if (cJSON_IsString(audio_download_url) &&
+        (audio_download_url->valuestring != NULL) &&
+        (audio_download_url->valuestring[0] != '\0')) {
+        task->audio_hash = audio_cache_service_hash_url(audio_download_url->valuestring);
         if (audio_cache_service_resolve_path(task->instance_id,
-                                             audio_url->valuestring,
+                                             audio_download_url->valuestring,
                                              task->local_path,
                                              sizeof(task->local_path)) != ESP_OK) {
             task->local_path[0] = '\0';
         }
         task->audio_status = PLAYBACK_AUDIO_STATUS_WAITING;
+    } else {
+        task->audio_status = PLAYBACK_AUDIO_STATUS_WAITING;
+        ESP_LOGW(TAG,
+                 "Remote playback task missing audioDownloadUrl instance=%s",
+                 task->instance_id);
     }
     if (cJSON_IsString(fallback_mode) && (fallback_mode->valuestring != NULL)) {
         playback_task_copy_string(task->fallback_mode,
@@ -679,7 +686,7 @@ static esp_err_t playback_task_apply_cloud_response(const char *json,
     for (index = 0; index < (size_t)cJSON_GetArraySize(task_array) && new_task_count < new_task_capacity; ++index) {
         playback_task_t parsed_task = {0};
         const cJSON *task_object = cJSON_GetArrayItem(task_array, (int)index);
-        const cJSON *audio_url = NULL;
+        const cJSON *audio_download_url = NULL;
         playback_task_t *existing_task = NULL;
 
         ret = playback_task_parse_remote_object(task_object, &parsed_task, now);
@@ -692,26 +699,34 @@ static esp_err_t playback_task_apply_cloud_response(const char *json,
 
         existing_task = playback_task_find_by_instance(parsed_task.instance_id);
         playback_task_merge_cached_fields(&parsed_task, existing_task);
-        audio_url = cJSON_GetObjectItemCaseSensitive(task_object, "audioUrl");
+        if ((parsed_task.local_path[0] == '\0') &&
+            (parsed_task.task_status == PLAYBACK_TASK_STATUS_READY)) {
+            parsed_task.task_status = PLAYBACK_TASK_STATUS_PENDING;
+        }
+        audio_download_url = cJSON_GetObjectItemCaseSensitive(task_object, "audioDownloadUrl");
         if ((cache_items != NULL) &&
             (cache_item_count != NULL) &&
             (*cache_item_count < cache_item_capacity) &&
-            cJSON_IsString(audio_url) &&
-            (audio_url->valuestring != NULL) &&
-            (audio_url->valuestring[0] != '\0')) {
-            if (strlen(audio_url->valuestring) >= sizeof(cache_items[*cache_item_count].audio_url)) {
+            cJSON_IsString(audio_download_url) &&
+            (audio_download_url->valuestring != NULL) &&
+            (audio_download_url->valuestring[0] != '\0')) {
+            if (strlen(audio_download_url->valuestring) >= sizeof(cache_items[*cache_item_count].download_url)) {
                 ESP_LOGW(TAG,
-                         "Skipping audio download: audioUrl too long len=%u max=%u instance=%s",
-                         (unsigned int)strlen(audio_url->valuestring),
-                         (unsigned int)(sizeof(cache_items[*cache_item_count].audio_url) - 1U),
+                         "Skipping audio download: audioDownloadUrl too long len=%u max=%u instance=%s",
+                         (unsigned int)strlen(audio_download_url->valuestring),
+                         (unsigned int)(sizeof(cache_items[*cache_item_count].download_url) - 1U),
                          parsed_task.instance_id);
                 new_tasks[new_task_count++] = parsed_task;
                 continue;
             }
-            playback_task_copy_string(cache_items[*cache_item_count].audio_url,
-                                      sizeof(cache_items[*cache_item_count].audio_url),
-                                      audio_url->valuestring);
+            playback_task_copy_string(cache_items[*cache_item_count].download_url,
+                                      sizeof(cache_items[*cache_item_count].download_url),
+                                      audio_download_url->valuestring);
             cache_items[*cache_item_count].ring_at_epoch = parsed_task.ring_at_epoch;
+            ESP_LOGI(TAG,
+                     "Queued audioDownloadUrl for instance=%s url=%s",
+                     parsed_task.instance_id,
+                     audio_download_url->valuestring);
             ++(*cache_item_count);
         }
         new_tasks[new_task_count++] = parsed_task;
@@ -1024,7 +1039,7 @@ static void playback_task_apply_audio_result(esp_err_t ret, const char *local_pa
 
     if ((ret == ESP_OK) && (local_path != NULL) && (local_path[0] != '\0')) {
         status_text = "cached";
-    } else if ((ret == ESP_ERR_NO_MEM) || (ret == ESP_ERR_NOT_FOUND)) {
+    } else if ((ret == ESP_ERR_NO_MEM) || (ret == ESP_ERR_NOT_FOUND) || (ret == ESP_ERR_INVALID_STATE)) {
         status_text = "waiting";
     } else {
         status_text = "failed";
@@ -1053,7 +1068,9 @@ static void playback_task_apply_audio_result(esp_err_t ret, const char *local_pa
                 should_report_ready = true;
             }
         } else {
-            uint8_t next_audio_status = ((ret == ESP_ERR_NO_MEM) || (ret == ESP_ERR_NOT_FOUND)) ?
+            uint8_t next_audio_status = ((ret == ESP_ERR_NO_MEM) ||
+                                         (ret == ESP_ERR_NOT_FOUND) ||
+                                         (ret == ESP_ERR_INVALID_STATE)) ?
                                         PLAYBACK_AUDIO_STATUS_WAITING :
                                         PLAYBACK_AUDIO_STATUS_FAILED;
             if (task->audio_status != next_audio_status) {
@@ -1112,13 +1129,13 @@ static void playback_task_handle_pending_audio_results(void)
     }
 }
 
-static void playback_task_network_audio_result(const char *audio_url,
+static void playback_task_network_audio_result(const char *download_url,
                                                esp_err_t ret,
                                                const char *local_path,
                                                void *ctx)
 {
     (void)ctx;
-    (void)audio_url;
+    (void)download_url;
 
     if ((local_path == NULL) || (local_path[0] == '\0')) {
         return;

@@ -21,7 +21,7 @@ This collection stores generated playback alarm instances for device pull, local
 - `status`: playback task status, such as `pending`.
 - `scriptStatus`: script generation status.
 - `audioStatus`: audio generation status.
-- `audioUrl`: remote audio file URL for device-side download and playback.
+- `audioDownloadUrl`: signed `downloadPlaybackAudio` URL for ESP32 device-side validation, redirect, download, and playback.
 - `fallbackMode`: fallback behavior when remote audio is unavailable.
 - `createdAt`: creation timestamp.
 - `updatedAt`: update timestamp.
@@ -52,7 +52,7 @@ This collection stores generated playback alarm instances for device pull, local
   "status": "pending",
   "scriptStatus": "generated",
   "audioStatus": "generated",
-  "audioUrl": "https://mp-569ac274-a245-482f-994d-e065e5e73b0b.cdn.bspapp.com/cloudstorage/9782c899-9824-4fdf-97a5-7bbbf12d537d.mp3",
+  "audioDownloadUrl": "https://alarm.yoyospace.cc/device-service/downloadPlaybackAudio?clientId=client_1776770443964_jmxlxc&deviceId=dev_demo_001&instanceId=instance_alarm_1776770757934_20260421233000000&exp=1776771000&sig=...",
   "fallbackMode": "device_local_realtime_mix",
   "createdAt": 1776770758119,
   "updatedAt": 1776770819259,
@@ -63,5 +63,35 @@ This collection stores generated playback alarm instances for device pull, local
   "audioFileId": "https://mp-569ac274-a245-482f-994d-e065e5e73b0b.cdn.bspapp.com/cloudstorage/9782c899-9824-4fdf-97a5-7bbbf12d537d.mp3",
   "audioLibraryId": "69e75f03816a3fbd38c88345",
   "audioProvider": "doubao_tts_v3"
+}
+```
+```json
+{
+    "clientId": "client_1776770443964_jmxlxc",
+    "instanceId": "instance_alarm_1776770757934_20260421233000000",
+    "alarmId": "alarm_1776845645148",
+    "deviceId": "dev_demo_001",
+    "ringAt": "2026-04-22T23:30:00.000Z",
+    "ringDateKey": "2026-04-23",
+    "time": "07:30",
+    "period": "上午",
+    "title": "起床",
+    "voice": "温柔派",
+    "nickname": "航哥哥",
+    "repeat": "每天",
+    "status": "pending",
+    "scriptStatus": "generated",
+    "audioStatus": "generated",
+    "audioUrl": "https://mp-569ac274-a245-482f-994d-e065e5e73b0b.cdn.bspapp.com/cloudstorage/ea5ad816-6f7e-4464-841f-ab0d45123d57.mp3",
+    "fallbackMode": "device_local_realtime_mix",
+    "createdAt": 1776845645415,
+    "updatedAt": 1776845697373,
+    "generationError": "",
+    "scriptLibraryId": "69e8836f7ae70807806e4953",
+    "scriptProvider": "ark",
+    "scriptText": "航哥哥，早上好呀。新的一天正温柔地等着你呢，该起床啦。昨晚睡得香不香呀？先别急着起来，轻轻伸个懒腰，活动一下手脚，再慢慢坐起身，让身体一点点苏醒过来。 今天外面天气可好啦，阳光暖暖的，像在轻轻拥抱你。不过早上出门的时候，记得在包里放件薄外套哦，早晚的凉意还是会偷偷溜过来的。要是你待会儿要去远些的地方，出门前记得抬头看看云朵多不多，再决定要不要带把伞，这样更安心。 好啦，慢慢来，先喝杯温水润润喉咙吧。早餐已经准备好啦，是你喜欢的味道。希望你今天每一步都走得从容，每一刻都过得开心。航哥哥，崭新的一天，要好好开始哦。",
+    "audioFileId": "https://mp-569ac274-a245-482f-994d-e065e5e73b0b.cdn.bspapp.com/cloudstorage/ea5ad816-6f7e-4464-841f-ab0d45123d57.mp3",
+    "audioLibraryId": "69e88381bd022074bc4e6ef4",
+    "audioProvider": "doubao_tts_v3"
 }
 ```

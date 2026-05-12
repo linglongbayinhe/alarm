@@ -43,7 +43,7 @@ typedef struct {
 
 typedef struct {
     bool in_use;
-    char audio_url[AUDIO_CACHE_URL_SIZE];
+    char download_url[AUDIO_CACHE_URL_SIZE];
     int64_t ring_at_epoch;
 } network_audio_download_job_t;
 
@@ -181,17 +181,17 @@ static bool network_task_audio_jobs_empty_locked(void)
     return true;
 }
 
-static bool network_task_audio_url_queued_locked(const char *audio_url)
+static bool network_task_download_url_queued_locked(const char *download_url)
 {
     size_t index = 0;
 
-    if ((audio_url == NULL) || (audio_url[0] == '\0')) {
+    if ((download_url == NULL) || (download_url[0] == '\0')) {
         return true;
     }
 
     for (index = 0; index < NETWORK_TASK_MAX_AUDIO_JOBS; ++index) {
         if (s_audio_download_jobs[index].in_use &&
-            (strcmp(s_audio_download_jobs[index].audio_url, audio_url) == 0)) {
+            (strcmp(s_audio_download_jobs[index].download_url, download_url) == 0)) {
             return true;
         }
     }
@@ -397,7 +397,7 @@ static void network_task_execute_weather_refresh(device_cloud_session_t *session
     }
 }
 
-static void network_task_audio_cache_result_bridge(const char *audio_url,
+static void network_task_audio_cache_result_bridge(const char *download_url,
                                                    esp_err_t ret,
                                                    const char *local_path,
                                                    void *ctx)
@@ -405,7 +405,7 @@ static void network_task_audio_cache_result_bridge(const char *audio_url,
     (void)ctx;
 
     if (s_audio_cache_handler != NULL) {
-        s_audio_cache_handler(audio_url,
+        s_audio_cache_handler(download_url,
                               ret,
                               local_path,
                               s_audio_cache_handler_ctx);
@@ -451,9 +451,9 @@ static void network_task_cleanup_audio_cache_if_needed(const network_audio_downl
     if (should_cleanup) {
         s_audio_cache_cleanup_pending = false;
         network_task_copy_string(protected_path, sizeof(protected_path), s_audio_cache_protected_path);
-        if ((current_job != NULL) && current_job->audio_url[0] != '\0') {
+        if ((current_job != NULL) && current_job->download_url[0] != '\0') {
             if (audio_cache_service_resolve_path(NULL,
-                                                 current_job->audio_url,
+                                                 current_job->download_url,
                                                  keep_paths[keep_count],
                                                  sizeof(keep_paths[keep_count])) == ESP_OK) {
                 keep_path_ptrs[keep_count] = keep_paths[keep_count];
@@ -463,7 +463,7 @@ static void network_task_cleanup_audio_cache_if_needed(const network_audio_downl
         for (index = 0; (index < NETWORK_TASK_MAX_AUDIO_JOBS) && (keep_count < (NETWORK_TASK_MAX_AUDIO_JOBS + 1U)); ++index) {
             if (s_audio_download_jobs[index].in_use) {
                 if (audio_cache_service_resolve_path(NULL,
-                                                     s_audio_download_jobs[index].audio_url,
+                                                     s_audio_download_jobs[index].download_url,
                                                      keep_paths[keep_count],
                                                      sizeof(keep_paths[keep_count])) == ESP_OK) {
                     keep_path_ptrs[keep_count] = keep_paths[keep_count];
@@ -489,32 +489,32 @@ static void network_task_execute_audio_download(const network_audio_download_job
     char local_path[AUDIO_CACHE_PATH_MAX] = {0};
     esp_err_t ret = ESP_OK;
 
-    if ((job == NULL) || (job->audio_url[0] == '\0')) {
+    if ((job == NULL) || (job->download_url[0] == '\0')) {
         network_task_finish_audio_download(ESP_ERR_INVALID_ARG);
         return;
     }
 
     network_task_cleanup_audio_cache_if_needed(job);
 
-    ret = audio_cache_service_resolve_path(NULL, job->audio_url, local_path, sizeof(local_path));
+    ret = audio_cache_service_resolve_path(NULL, job->download_url, local_path, sizeof(local_path));
     if (ret != ESP_OK) {
-        network_task_audio_cache_result_bridge(job->audio_url, ret, "", NULL);
+        network_task_audio_cache_result_bridge(job->download_url, ret, "", NULL);
         network_task_finish_audio_download(ret);
         return;
     }
 
     if (audio_cache_service_file_exists(local_path)) {
         ESP_LOGI(TAG, "Audio cache hit via network queue: path=%s", local_path);
-        network_task_audio_cache_result_bridge(job->audio_url, ESP_OK, local_path, NULL);
+        network_task_audio_cache_result_bridge(job->download_url, ESP_OK, local_path, NULL);
         network_task_finish_audio_download(ESP_OK);
         return;
     }
 
-    ESP_LOGI(TAG, "Running audio_download path=%s", local_path);
+    ESP_LOGI(TAG, "Running audio_download path=%s downloadUrl=%s", local_path, job->download_url);
     network_task_log_heap("before_audio_download");
-    ret = audio_cache_service_download(NULL, job->audio_url, local_path, sizeof(local_path));
+    ret = audio_cache_service_download(NULL, job->download_url, local_path, sizeof(local_path));
     network_task_log_heap("after_audio_download");
-    network_task_audio_cache_result_bridge(job->audio_url, ret, local_path, NULL);
+    network_task_audio_cache_result_bridge(job->download_url, ret, local_path, NULL);
     network_task_finish_audio_download(ret);
 }
 
@@ -815,18 +815,18 @@ void network_task_service_request_audio_cache_maintenance(const network_task_aud
     for (index = 0; index < item_count; ++index) {
         size_t slot = 0;
 
-        if (items[index].audio_url[0] == '\0') {
+        if (items[index].download_url[0] == '\0') {
             continue;
         }
-        if (network_task_audio_url_queued_locked(items[index].audio_url)) {
+        if (network_task_download_url_queued_locked(items[index].download_url)) {
             continue;
         }
         for (slot = 0; slot < NETWORK_TASK_MAX_AUDIO_JOBS; ++slot) {
             if (!s_audio_download_jobs[slot].in_use) {
                 s_audio_download_jobs[slot].in_use = true;
-                network_task_copy_string(s_audio_download_jobs[slot].audio_url,
-                                         sizeof(s_audio_download_jobs[slot].audio_url),
-                                         items[index].audio_url);
+                network_task_copy_string(s_audio_download_jobs[slot].download_url,
+                                         sizeof(s_audio_download_jobs[slot].download_url),
+                                         items[index].download_url);
                 s_audio_download_jobs[slot].ring_at_epoch = items[index].ring_at_epoch;
                 ++queued_count;
                 break;

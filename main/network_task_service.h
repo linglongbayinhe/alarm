@@ -14,7 +14,7 @@ typedef void (*network_task_json_result_cb_t)(esp_err_t ret,
                                               const char *json,
                                               size_t json_len,
                                               void *ctx);
-typedef void (*network_task_audio_cache_result_cb_t)(const char *audio_url,
+typedef void (*network_task_audio_cache_result_cb_t)(const char *download_url,
                                                      esp_err_t ret,
                                                      const char *local_path,
                                                      void *ctx);
@@ -36,7 +36,7 @@ typedef enum {
 } network_task_weather_reason_t;
 
 typedef struct {
-    char audio_url[AUDIO_CACHE_URL_SIZE];
+    char download_url[AUDIO_CACHE_URL_SIZE];
     int64_t ring_at_epoch;
 } network_task_audio_cache_item_t;
 
