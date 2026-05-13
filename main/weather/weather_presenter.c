@@ -111,7 +111,7 @@ static void weather_presenter_format_temperature(const weather_snapshot_t *snaps
         return;
     }
 
-    snprintf(buffer, buffer_size, "%d℃", (int)snapshot->current_temperature_c);
+    snprintf(buffer, buffer_size, "%dC", (int)snapshot->current_temperature_c);
 }
 
 static void weather_presenter_format_details(const weather_snapshot_t *snapshot,

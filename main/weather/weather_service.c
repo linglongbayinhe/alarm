@@ -1,4 +1,4 @@
-#include "weather_device_service_provider.h"
+#include "weather_service.h"
 
 #include <ctype.h>
 #include <stdbool.h>
@@ -14,16 +14,16 @@
 #include "network_task_service.h"
 #include "time_service.h"
 
-#define WEATHER_DEVICE_TASK_STACK_SIZE             3072
-#define WEATHER_DEVICE_TASK_PRIORITY               4
-#define WEATHER_DEVICE_TIME_WAIT_MS                5000
-#define WEATHER_DEVICE_TIME_LOG_MS                 30000
-#define WEATHER_DEVICE_NOTIFY_REFRESH              BIT0
-#define WEATHER_DEVICE_INITIAL_DELAY_SECONDS       20
-#define WEATHER_DEVICE_RETRY_FIRST_SECONDS         (30 * 60)
-#define WEATHER_DEVICE_RETRY_MAX_SECONDS           (60 * 60)
+#define WEATHER_SERVICE_TASK_STACK_SIZE             3072
+#define WEATHER_SERVICE_TASK_PRIORITY               4
+#define WEATHER_SERVICE_TIME_WAIT_MS                5000
+#define WEATHER_SERVICE_TIME_LOG_MS                 30000
+#define WEATHER_SERVICE_NOTIFY_REFRESH              BIT0
+#define WEATHER_SERVICE_INITIAL_DELAY_SECONDS       20
+#define WEATHER_SERVICE_RETRY_FIRST_SECONDS         (30 * 60)
+#define WEATHER_SERVICE_RETRY_MAX_SECONDS           (60 * 60)
 
-static const char *TAG = "WEATHER_DEVICE";
+static const char *TAG = "WEATHER_SERVICE";
 
 static portMUX_TYPE s_snapshot_lock = portMUX_INITIALIZER_UNLOCKED;
 static weather_snapshot_t s_latest_snapshot;
@@ -35,7 +35,7 @@ static TaskHandle_t s_task_handle;
 static uint32_t s_last_cloud_generation;
 static bool s_network_handler_registered;
 
-static void weather_device_copy_text(char *destination, size_t destination_size, const char *source)
+static void weather_service_copy_text(char *destination, size_t destination_size, const char *source)
 {
     if ((destination == NULL) || (destination_size == 0)) {
         return;
@@ -44,7 +44,7 @@ static void weather_device_copy_text(char *destination, size_t destination_size,
     snprintf(destination, destination_size, "%s", source == NULL ? "" : source);
 }
 
-static bool weather_device_string_equals(const char *left, const char *right)
+static bool weather_service_string_equals(const char *left, const char *right)
 {
     if ((left == NULL) || (right == NULL)) {
         return false;
@@ -61,70 +61,70 @@ static bool weather_device_string_equals(const char *left, const char *right)
     return (*left == '\0') && (*right == '\0');
 }
 
-static weather_condition_t weather_device_map_icon(const char *weather_icon)
+static weather_condition_t weather_service_map_icon(const char *weather_icon)
 {
-    if (weather_device_string_equals(weather_icon, "sunny") ||
-        weather_device_string_equals(weather_icon, "clear") ||
-        weather_device_string_equals(weather_icon, "clear_day") ||
-        weather_device_string_equals(weather_icon, "clear-day")) {
+    if (weather_service_string_equals(weather_icon, "sunny") ||
+        weather_service_string_equals(weather_icon, "clear") ||
+        weather_service_string_equals(weather_icon, "clear_day") ||
+        weather_service_string_equals(weather_icon, "clear-day")) {
         return WEATHER_CONDITION_CLEAR_DAY;
     }
-    if (weather_device_string_equals(weather_icon, "clear_night") ||
-        weather_device_string_equals(weather_icon, "clear-night")) {
+    if (weather_service_string_equals(weather_icon, "clear_night") ||
+        weather_service_string_equals(weather_icon, "clear-night")) {
         return WEATHER_CONDITION_CLEAR_NIGHT;
     }
-    if (weather_device_string_equals(weather_icon, "cloudy") ||
-        weather_device_string_equals(weather_icon, "cloudy_day") ||
-        weather_device_string_equals(weather_icon, "cloudy-day")) {
+    if (weather_service_string_equals(weather_icon, "cloudy") ||
+        weather_service_string_equals(weather_icon, "cloudy_day") ||
+        weather_service_string_equals(weather_icon, "cloudy-day")) {
         return WEATHER_CONDITION_CLOUDY_DAY;
     }
-    if (weather_device_string_equals(weather_icon, "cloudy_night") ||
-        weather_device_string_equals(weather_icon, "cloudy-night")) {
+    if (weather_service_string_equals(weather_icon, "cloudy_night") ||
+        weather_service_string_equals(weather_icon, "cloudy-night")) {
         return WEATHER_CONDITION_CLOUDY_NIGHT;
     }
-    if (weather_device_string_equals(weather_icon, "overcast")) {
+    if (weather_service_string_equals(weather_icon, "overcast")) {
         return WEATHER_CONDITION_OVERCAST;
     }
-    if (weather_device_string_equals(weather_icon, "light_rain") ||
-        weather_device_string_equals(weather_icon, "light-rain")) {
+    if (weather_service_string_equals(weather_icon, "light_rain") ||
+        weather_service_string_equals(weather_icon, "light-rain")) {
         return WEATHER_CONDITION_LIGHT_RAIN;
     }
-    if (weather_device_string_equals(weather_icon, "rain") ||
-        weather_device_string_equals(weather_icon, "moderate_rain") ||
-        weather_device_string_equals(weather_icon, "moderate-rain")) {
+    if (weather_service_string_equals(weather_icon, "rain") ||
+        weather_service_string_equals(weather_icon, "moderate_rain") ||
+        weather_service_string_equals(weather_icon, "moderate-rain")) {
         return WEATHER_CONDITION_MODERATE_RAIN;
     }
-    if (weather_device_string_equals(weather_icon, "heavy_rain") ||
-        weather_device_string_equals(weather_icon, "heavy-rain")) {
+    if (weather_service_string_equals(weather_icon, "heavy_rain") ||
+        weather_service_string_equals(weather_icon, "heavy-rain")) {
         return WEATHER_CONDITION_HEAVY_RAIN;
     }
-    if (weather_device_string_equals(weather_icon, "shower")) {
+    if (weather_service_string_equals(weather_icon, "shower")) {
         return WEATHER_CONDITION_SHOWER;
     }
-    if (weather_device_string_equals(weather_icon, "thunderstorm")) {
+    if (weather_service_string_equals(weather_icon, "thunderstorm")) {
         return WEATHER_CONDITION_THUNDERSTORM;
     }
-    if (weather_device_string_equals(weather_icon, "snow")) {
+    if (weather_service_string_equals(weather_icon, "snow")) {
         return WEATHER_CONDITION_SNOW;
     }
-    if (weather_device_string_equals(weather_icon, "fog")) {
+    if (weather_service_string_equals(weather_icon, "fog")) {
         return WEATHER_CONDITION_FOG;
     }
-    if (weather_device_string_equals(weather_icon, "haze")) {
+    if (weather_service_string_equals(weather_icon, "haze")) {
         return WEATHER_CONDITION_HAZE;
     }
-    if (weather_device_string_equals(weather_icon, "dust_storm") ||
-        weather_device_string_equals(weather_icon, "dust-storm")) {
+    if (weather_service_string_equals(weather_icon, "dust_storm") ||
+        weather_service_string_equals(weather_icon, "dust-storm")) {
         return WEATHER_CONDITION_DUST_STORM;
     }
-    if (weather_device_string_equals(weather_icon, "windy")) {
+    if (weather_service_string_equals(weather_icon, "windy")) {
         return WEATHER_CONDITION_WINDY;
     }
 
     return WEATHER_CONDITION_UNKNOWN;
 }
 
-static void weather_device_publish_snapshot(const weather_snapshot_t *snapshot, bool successful)
+static void weather_service_publish_snapshot(const weather_snapshot_t *snapshot, bool successful)
 {
     if (snapshot == NULL) {
         return;
@@ -139,7 +139,7 @@ static void weather_device_publish_snapshot(const weather_snapshot_t *snapshot, 
     taskEXIT_CRITICAL(&s_snapshot_lock);
 }
 
-static bool weather_device_has_successful_snapshot(void)
+static bool weather_service_has_successful_snapshot(void)
 {
     bool has_successful_snapshot = false;
 
@@ -150,7 +150,7 @@ static bool weather_device_has_successful_snapshot(void)
     return has_successful_snapshot;
 }
 
-static void weather_device_publish_simple_state(weather_data_state_t state)
+static void weather_service_publish_simple_state(weather_data_state_t state)
 {
     weather_snapshot_t snapshot = {
         .state = state,
@@ -158,10 +158,10 @@ static void weather_device_publish_simple_state(weather_data_state_t state)
         .is_daytime = true,
     };
 
-    weather_device_publish_snapshot(&snapshot, false);
+    weather_service_publish_snapshot(&snapshot, false);
 }
 
-static esp_err_t weather_device_parse_response(const char *json, weather_snapshot_t *snapshot)
+static esp_err_t weather_service_parse_response(const char *json, weather_snapshot_t *snapshot)
 {
     esp_err_t ret = ESP_FAIL;
     cJSON *root = NULL;
@@ -206,7 +206,7 @@ static esp_err_t weather_device_parse_response(const char *json, weather_snapsho
         goto cleanup;
     }
 
-    condition = weather_device_map_icon(weather_icon->valuestring);
+    condition = weather_service_map_icon(weather_icon->valuestring);
 
     memset(snapshot, 0, sizeof(*snapshot));
     snapshot->state = WEATHER_DATA_STATE_READY;
@@ -218,13 +218,13 @@ static esp_err_t weather_device_parse_response(const char *json, weather_snapsho
     snapshot->has_update_time = true;
     snapshot->updated_at_utc = time(NULL);
     snapshot->has_weather_icon_text = true;
-    weather_device_copy_text(snapshot->weather_icon_text,
+    weather_service_copy_text(snapshot->weather_icon_text,
                              sizeof(snapshot->weather_icon_text),
                              weather_icon->valuestring);
 
     if (cJSON_IsString(weather_text) && (weather_text->valuestring != NULL)) {
         snapshot->has_weather_text = true;
-        weather_device_copy_text(snapshot->weather_text,
+        weather_service_copy_text(snapshot->weather_text,
                                  sizeof(snapshot->weather_text),
                                  weather_text->valuestring);
     }
@@ -254,7 +254,7 @@ cleanup:
     return ret;
 }
 
-static esp_err_t weather_device_apply_response(const char *json)
+static esp_err_t weather_service_apply_response(const char *json)
 {
     esp_err_t ret = ESP_OK;
     weather_snapshot_t snapshot = {0};
@@ -265,31 +265,31 @@ static esp_err_t weather_device_apply_response(const char *json)
 
     ESP_LOGI(TAG, "Raw JSON: %s", json);
 
-    ret = weather_device_parse_response(json, &snapshot);
+    ret = weather_service_parse_response(json, &snapshot);
     if (ret == ESP_OK) {
-        weather_device_publish_snapshot(&snapshot, true);
+        weather_service_publish_snapshot(&snapshot, true);
     }
 
     return ret;
 }
 
-static void weather_device_network_result(esp_err_t ret, const char *json, size_t json_len, void *ctx)
+static void weather_service_network_result(esp_err_t ret, const char *json, size_t json_len, void *ctx)
 {
     (void)json_len;
     (void)ctx;
 
     if (ret == ESP_OK) {
-        ret = weather_device_apply_response(json);
+        ret = weather_service_apply_response(json);
     }
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Weather refresh failed: %s", esp_err_to_name(ret));
-        if (!weather_device_has_successful_snapshot()) {
-            weather_device_publish_simple_state(WEATHER_DATA_STATE_ERROR);
+        if (!weather_service_has_successful_snapshot()) {
+            weather_service_publish_simple_state(WEATHER_DATA_STATE_ERROR);
         }
     }
 }
 
-static uint32_t weather_device_next_retry_seconds(uint32_t failure_count,
+static uint32_t weather_service_next_retry_seconds(uint32_t failure_count,
                                                   const device_cloud_config_t *config)
 {
     if ((config != NULL) && (failure_count == 0U)) {
@@ -298,13 +298,13 @@ static uint32_t weather_device_next_retry_seconds(uint32_t failure_count,
                    : (15U * 60U);
     }
     if (failure_count <= 1U) {
-        return WEATHER_DEVICE_RETRY_FIRST_SECONDS;
+        return WEATHER_SERVICE_RETRY_FIRST_SECONDS;
     }
 
-    return WEATHER_DEVICE_RETRY_MAX_SECONDS;
+    return WEATHER_SERVICE_RETRY_MAX_SECONDS;
 }
 
-static TickType_t weather_device_wait_for_time_or_refresh(bool *refresh_requested)
+static TickType_t weather_service_wait_for_time_or_refresh(bool *refresh_requested)
 {
     int waited_ms = 0;
 
@@ -317,16 +317,16 @@ static TickType_t weather_device_wait_for_time_or_refresh(bool *refresh_requeste
             return portMAX_DELAY;
         }
 
-        if ((waited_ms % WEATHER_DEVICE_TIME_LOG_MS) == 0) {
+        if ((waited_ms % WEATHER_SERVICE_TIME_LOG_MS) == 0) {
             ESP_LOGI(TAG, "Waiting for valid system time before HTTPS request");
         }
 
-        weather_device_publish_simple_state(WEATHER_DATA_STATE_LOADING);
-        xTaskNotifyWait(0, UINT32_MAX, &notify_bits, pdMS_TO_TICKS(WEATHER_DEVICE_TIME_WAIT_MS));
-        if ((notify_bits & WEATHER_DEVICE_NOTIFY_REFRESH) != 0U) {
+        weather_service_publish_simple_state(WEATHER_DATA_STATE_LOADING);
+        xTaskNotifyWait(0, UINT32_MAX, &notify_bits, pdMS_TO_TICKS(WEATHER_SERVICE_TIME_WAIT_MS));
+        if ((notify_bits & WEATHER_SERVICE_NOTIFY_REFRESH) != 0U) {
             *refresh_requested = true;
         }
-        waited_ms += WEATHER_DEVICE_TIME_WAIT_MS;
+        waited_ms += WEATHER_SERVICE_TIME_WAIT_MS;
     }
 
     if (waited_ms > 0) {
@@ -337,7 +337,7 @@ static TickType_t weather_device_wait_for_time_or_refresh(bool *refresh_requeste
     return 0;
 }
 
-static void weather_device_provider_task(void *arg)
+static void weather_service_provider_task(void *arg)
 {
     uint32_t failure_count = 0;
     bool refresh_requested = false;
@@ -346,7 +346,7 @@ static void weather_device_provider_task(void *arg)
 
     (void)arg;
     ESP_LOGI(TAG,
-             "weather_device stack_free=%u bytes",
+             "weather_service stack_free=%u bytes",
              (unsigned int)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
 
     while (true) {
@@ -368,7 +368,7 @@ static void weather_device_provider_task(void *arg)
             initial_delay_scheduled = true;
         }
 
-        if (weather_device_wait_for_time_or_refresh(&refresh_requested) == portMAX_DELAY) {
+        if (weather_service_wait_for_time_or_refresh(&refresh_requested) == portMAX_DELAY) {
             next_refresh_epoch = 0;
             continue;
         }
@@ -380,16 +380,16 @@ static void weather_device_provider_task(void *arg)
 
         now = time(NULL);
         if (!refresh_requested && !initial_delay_scheduled && (next_refresh_epoch == 0)) {
-            next_refresh_epoch = now + WEATHER_DEVICE_INITIAL_DELAY_SECONDS;
+            next_refresh_epoch = now + WEATHER_SERVICE_INITIAL_DELAY_SECONDS;
             initial_delay_scheduled = true;
             ESP_LOGI(TAG,
                      "Delaying initial weather HTTPS request by %u s",
-                     (unsigned int)WEATHER_DEVICE_INITIAL_DELAY_SECONDS);
+                     (unsigned int)WEATHER_SERVICE_INITIAL_DELAY_SECONDS);
         }
         if (refresh_requested || (next_refresh_epoch == 0) || (now >= next_refresh_epoch)) {
             network_task_service_request_weather_refresh(NETWORK_TASK_WEATHER_REASON_NORMAL);
             failure_count = 0;
-            next_refresh_epoch = time(NULL) + (time_t)weather_device_next_retry_seconds(failure_count, &config);
+            next_refresh_epoch = time(NULL) + (time_t)weather_service_next_retry_seconds(failure_count, &config);
             refresh_requested = false;
         }
 
@@ -405,7 +405,7 @@ static void weather_device_provider_task(void *arg)
             timed_out = true;
         }
 
-        if ((notify_bits & WEATHER_DEVICE_NOTIFY_REFRESH) != 0U) {
+        if ((notify_bits & WEATHER_SERVICE_NOTIFY_REFRESH) != 0U) {
             refresh_requested = true;
         }
         if (device_cloud_service_get_generation() != s_last_cloud_generation) {
@@ -418,8 +418,8 @@ static void weather_device_provider_task(void *arg)
     }
 }
 
-esp_err_t weather_device_service_provider_start(EventGroupHandle_t connected_event_group,
-                                                EventBits_t connected_bit)
+esp_err_t weather_service_start(EventGroupHandle_t connected_event_group,
+                                EventBits_t connected_bit)
 {
     BaseType_t task_created = pdFAIL;
     esp_err_t ret = ESP_OK;
@@ -429,23 +429,23 @@ esp_err_t weather_device_service_provider_start(EventGroupHandle_t connected_eve
     }
 
     if (s_task_handle != NULL) {
-        weather_device_service_provider_request_refresh();
+        weather_service_request_refresh();
         return ESP_OK;
     }
 
     s_connected_event_group = connected_event_group;
     s_connected_bit = connected_bit;
     s_last_cloud_generation = device_cloud_service_get_generation();
-    ret = weather_device_service_provider_prepare();
+    ret = weather_service_prepare();
     if (ret != ESP_OK) {
         return ret;
     }
 
-    task_created = xTaskCreate(weather_device_provider_task,
-                               "weather_device",
-                               WEATHER_DEVICE_TASK_STACK_SIZE,
+    task_created = xTaskCreate(weather_service_provider_task,
+                               "weather_service",
+                               WEATHER_SERVICE_TASK_STACK_SIZE,
                                NULL,
-                               WEATHER_DEVICE_TASK_PRIORITY,
+                               WEATHER_SERVICE_TASK_PRIORITY,
                                &s_task_handle);
     if (task_created != pdPASS) {
         s_task_handle = NULL;
@@ -455,19 +455,19 @@ esp_err_t weather_device_service_provider_start(EventGroupHandle_t connected_eve
     return ESP_OK;
 }
 
-esp_err_t weather_device_service_provider_prepare(void)
+esp_err_t weather_service_prepare(void)
 {
     if (!s_network_handler_registered) {
-        network_task_service_register_weather_handler(weather_device_network_result, NULL);
+        network_task_service_register_weather_handler(weather_service_network_result, NULL);
         s_network_handler_registered = true;
     }
     if (!s_has_snapshot) {
-        weather_device_publish_simple_state(WEATHER_DATA_STATE_LOADING);
+        weather_service_publish_simple_state(WEATHER_DATA_STATE_LOADING);
     }
     return ESP_OK;
 }
 
-esp_err_t weather_device_service_provider_get_snapshot(weather_snapshot_t *snapshot)
+esp_err_t weather_service_get_snapshot(weather_snapshot_t *snapshot)
 {
     if (snapshot == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -487,11 +487,11 @@ esp_err_t weather_device_service_provider_get_snapshot(weather_snapshot_t *snaps
     return ESP_OK;
 }
 
-void weather_device_service_provider_request_refresh(void)
+void weather_service_request_refresh(void)
 {
     if (s_task_handle == NULL) {
         return;
     }
 
-    xTaskNotify(s_task_handle, WEATHER_DEVICE_NOTIFY_REFRESH, eSetBits);
+    xTaskNotify(s_task_handle, WEATHER_SERVICE_NOTIFY_REFRESH, eSetBits);
 }
