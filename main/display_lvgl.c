@@ -13,8 +13,11 @@
 
 static const char *TAG = "display_lvgl";
 
-/** Solid RGB565 fill before LVGL draws, to remove previous firmware’s panel retention. */
+/** Solid RGB565 fill before LVGL draws, to remove previous firmware panel retention. */
 #define DISPLAY_LVGL_STARTUP_CLEAR_RGB565 0x0000U
+
+static lv_display_t *s_lvgl_disp;
+static bool s_lvgl_ready;
 
 static void display_lvgl_fill_panel_solid(esp_lcd_panel_handle_t panel, uint16_t rgb565)
 {
@@ -33,9 +36,6 @@ static void display_lvgl_fill_panel_solid(esp_lcd_panel_handle_t panel, uint16_t
         }
     }
 }
-
-static lv_display_t *s_lvgl_disp;
-static bool s_lvgl_ready;
 
 bool display_lvgl_is_active(void)
 {
@@ -66,13 +66,11 @@ esp_err_t display_lvgl_init(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_ha
 
     lvgl_port_lock(0);
 
-    /* Full hardware clear so partial LVGL buffers do not leave last-flash garbage on panel. */
     display_lvgl_fill_panel_solid(panel, DISPLAY_LVGL_STARTUP_CLEAR_RGB565);
 
     ui_init();
     ui_bridge_init();
 
-    /* Partial buffer: invalidate active screen so first flush covers full logical screen. */
     {
         lv_obj_t *scr = lv_display_get_screen_active(s_lvgl_disp);
         if (scr != NULL) {

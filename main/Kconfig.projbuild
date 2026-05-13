@@ -80,13 +80,6 @@ menu "Example Configuration"
                 Weather mock scenario value. Values match weather_mock_scenario_t:
                 0 unknown, 1 clear day, 2 clear night, ... 15 windy.
 
-        config APP_WEATHER_GALLERY_TEST_PAGE
-            bool "Enable weather icon gallery test page"
-            default n
-            help
-                Render the dedicated weather icon gallery test page in the legacy
-                strip renderer. Keep disabled for production LVGL UI builds.
-
         config APP_LOG_SENSITIVE_DATA
             bool "Log sensitive provisioning payloads"
             default n

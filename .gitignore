@@ -9,3 +9,5 @@ dependencies.lock
 Thumbs.db
 *.log
 .svn/
+tools/weather_icon_png_export/export_weather_icons.exe
+tools/weather_icon_png_export/out/
