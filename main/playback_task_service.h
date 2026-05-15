@@ -35,6 +35,8 @@ typedef struct {
     int64_t ring_at_epoch;
     char title[PLAYBACK_TASK_TITLE_SIZE];
     uint32_t audio_hash;
+    char audio_download_url[AUDIO_CACHE_URL_SIZE];
+    char audio_id[AUDIO_CACHE_ID_SIZE];
     char local_path[AUDIO_CACHE_PATH_MAX];
     char fallback_mode[PLAYBACK_TASK_FALLBACK_MODE_SIZE];
     uint8_t task_status;

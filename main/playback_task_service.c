@@ -48,6 +48,9 @@ typedef struct {
 
 typedef struct {
     bool in_use;
+    char request_url[AUDIO_CACHE_URL_SIZE];
+    char canonical_url[AUDIO_CACHE_CANONICAL_URL_SIZE];
+    char audio_id[AUDIO_CACHE_ID_SIZE];
     char local_path[AUDIO_CACHE_PATH_MAX];
     esp_err_t ret;
 } playback_audio_result_t;
@@ -136,7 +139,7 @@ static esp_err_t playback_task_save_state_to_nvs(void)
     }
 
     blob->magic = 0x50544231U;
-    blob->version = 3;
+    blob->version = 4;
     blob->task_count = (uint32_t)s_task_count;
     if (s_task_count > 0) {
         memcpy(blob->tasks, s_tasks, sizeof(playback_task_t) * s_task_count);
@@ -215,7 +218,7 @@ static void playback_task_load_state(void)
 
     if (nvs_get_blob(handle, PLAYBACK_TASK_BLOB_KEY, blob, &blob_size) == ESP_OK) {
         if ((blob->magic == 0x50544231U) &&
-            (blob->version == 3U) &&
+            (blob->version == 4U) &&
             (blob->task_count <= PLAYBACK_TASK_MAX_COUNT) &&
             (blob_size >= playback_task_blob_size_for_count(blob->task_count))) {
             s_task_count = blob->task_count;
@@ -437,9 +440,8 @@ static void playback_task_merge_cached_fields(playback_task_t *new_task, const p
     }
 
     same_ring_at = (new_task->ring_at_epoch == existing_task->ring_at_epoch);
-    same_audio = (new_task->audio_hash != 0U) &&
-                 (new_task->audio_hash == existing_task->audio_hash) &&
-                 (strcmp(new_task->local_path, existing_task->local_path) == 0);
+    same_audio = (new_task->audio_download_url[0] != '\0') &&
+                 (strcmp(new_task->audio_download_url, existing_task->audio_download_url) == 0);
 
     if (!same_ring_at) {
         ESP_LOGI(TAG,
@@ -448,6 +450,9 @@ static void playback_task_merge_cached_fields(playback_task_t *new_task, const p
     }
 
     if (same_audio) {
+        new_task->audio_hash = existing_task->audio_hash;
+        playback_task_copy_string(new_task->audio_id, sizeof(new_task->audio_id), existing_task->audio_id);
+        playback_task_copy_string(new_task->local_path, sizeof(new_task->local_path), existing_task->local_path);
         new_task->audio_status = existing_task->audio_status;
     }
 
@@ -504,13 +509,9 @@ static esp_err_t playback_task_parse_remote_object(const cJSON *task_object,
     if (cJSON_IsString(audio_download_url) &&
         (audio_download_url->valuestring != NULL) &&
         (audio_download_url->valuestring[0] != '\0')) {
-        task->audio_hash = audio_cache_service_hash_url(audio_download_url->valuestring);
-        if (audio_cache_service_resolve_path(task->instance_id,
-                                             audio_download_url->valuestring,
-                                             task->local_path,
-                                             sizeof(task->local_path)) != ESP_OK) {
-            task->local_path[0] = '\0';
-        }
+        playback_task_copy_string(task->audio_download_url,
+                                  sizeof(task->audio_download_url),
+                                  audio_download_url->valuestring);
         task->audio_status = PLAYBACK_AUDIO_STATUS_WAITING;
     } else {
         task->audio_status = PLAYBACK_AUDIO_STATUS_WAITING;
@@ -722,12 +723,12 @@ static esp_err_t playback_task_apply_cloud_response(const char *json,
             }
             playback_task_copy_string(cache_items[*cache_item_count].download_url,
                                       sizeof(cache_items[*cache_item_count].download_url),
-                                      audio_download_url->valuestring);
+                                      parsed_task.audio_download_url);
             cache_items[*cache_item_count].ring_at_epoch = parsed_task.ring_at_epoch;
             ESP_LOGI(TAG,
                      "Queued audioDownloadUrl for instance=%s url=%s",
                      parsed_task.instance_id,
-                     audio_download_url->valuestring);
+                     parsed_task.audio_download_url);
             ++(*cache_item_count);
         }
         new_tasks[new_task_count++] = parsed_task;
@@ -821,9 +822,10 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
                  (unsigned int)s_current_volume_percent);
     } else {
         ESP_LOGW(TAG,
-                 "No playable audio for %s: localPath=%s audioHash=%" PRIu32 " fallbackMode=%s fallbackAllowed=%d defaultPath=%s defaultExists=%d",
+                 "No playable audio for %s: localPath=%s audioId=%s audioHash=%" PRIu32 " fallbackMode=%s fallbackAllowed=%d defaultPath=%s defaultExists=%d",
                  task->instance_id,
                  task->local_path,
+                 task->audio_id,
                  task->audio_hash,
                  task->fallback_mode,
                  playback_task_allows_fallback(task) ? 1 : 0,
@@ -1032,14 +1034,18 @@ static void playback_task_handle_pending_pull_result(void)
     }
 }
 
-static void playback_task_apply_audio_result(esp_err_t ret, const char *local_path)
+static void playback_task_apply_audio_result(const char *request_url,
+                                             const char *canonical_url,
+                                             const char *audio_id,
+                                             esp_err_t ret,
+                                             const char *local_path)
 {
     size_t index = 0;
     bool changed = false;
     bool should_report_ready = false;
     const char *status_text = NULL;
 
-    if ((local_path == NULL) || (local_path[0] == '\0')) {
+    if ((request_url == NULL) || (request_url[0] == '\0')) {
         return;
     }
 
@@ -1051,19 +1057,32 @@ static void playback_task_apply_audio_result(esp_err_t ret, const char *local_pa
         status_text = "failed";
     }
     ESP_LOGI(TAG,
-             "Audio cache result: status=%s ret=%s path=%s",
+             "Audio cache result: status=%s ret=%s requestUrl=%s canonicalUrl=%s audioId=%s path=%s",
              status_text,
              esp_err_to_name(ret),
-             local_path);
+             request_url,
+             canonical_url == NULL ? "" : canonical_url,
+             audio_id == NULL ? "" : audio_id,
+             local_path == NULL ? "" : local_path);
 
     for (index = 0; index < s_task_count; ++index) {
         playback_task_t *task = &s_tasks[index];
 
-        if (strcmp(task->local_path, local_path) != 0) {
+        if ((strcmp(task->audio_download_url, request_url) != 0) &&
+            ((local_path == NULL) || (local_path[0] == '\0') || (strcmp(task->local_path, local_path) != 0))) {
             continue;
         }
 
         if ((ret == ESP_OK) && (local_path != NULL) && (local_path[0] != '\0')) {
+            if ((audio_id != NULL) && (audio_id[0] != '\0') && (strcmp(task->audio_id, audio_id) != 0)) {
+                playback_task_copy_string(task->audio_id, sizeof(task->audio_id), audio_id);
+                task->audio_hash = audio_cache_service_hash_url(audio_id);
+                changed = true;
+            }
+            if (strcmp(task->local_path, local_path) != 0) {
+                playback_task_copy_string(task->local_path, sizeof(task->local_path), local_path);
+                changed = true;
+            }
             if (task->audio_status != PLAYBACK_AUDIO_STATUS_CACHED) {
                 task->audio_status = PLAYBACK_AUDIO_STATUS_CACHED;
                 changed = true;
@@ -1128,33 +1147,47 @@ static void playback_task_handle_pending_audio_results(void)
     playback_audio_result_t result = {0};
 
     while (playback_task_take_audio_result(&result)) {
-        playback_task_apply_audio_result(result.ret, result.local_path);
+        playback_task_apply_audio_result(result.request_url,
+                                         result.canonical_url,
+                                         result.audio_id,
+                                         result.ret,
+                                         result.local_path);
         if (s_audio_result_done_sem != NULL) {
             xSemaphoreGive(s_audio_result_done_sem);
         }
     }
 }
 
-static void playback_task_network_audio_result(const char *download_url,
+static void playback_task_network_audio_result(const char *request_url,
+                                               const char *canonical_url,
+                                               const char *audio_id,
                                                esp_err_t ret,
                                                const char *local_path,
                                                void *ctx)
 {
     (void)ctx;
-    (void)download_url;
 
-    if ((local_path == NULL) || (local_path[0] == '\0')) {
+    if ((request_url == NULL) || (request_url[0] == '\0')) {
         return;
     }
 
     if ((s_task_handle == NULL) || (s_audio_result_done_sem == NULL)) {
-        playback_task_apply_audio_result(ret, local_path);
+        playback_task_apply_audio_result(request_url, canonical_url, audio_id, ret, local_path);
         return;
     }
 
     taskENTER_CRITICAL(&s_audio_result_lock);
     s_audio_result.in_use = true;
     s_audio_result.ret = ret;
+    playback_task_copy_string(s_audio_result.request_url,
+                              sizeof(s_audio_result.request_url),
+                              request_url);
+    playback_task_copy_string(s_audio_result.canonical_url,
+                              sizeof(s_audio_result.canonical_url),
+                              canonical_url);
+    playback_task_copy_string(s_audio_result.audio_id,
+                              sizeof(s_audio_result.audio_id),
+                              audio_id);
     playback_task_copy_string(s_audio_result.local_path,
                               sizeof(s_audio_result.local_path),
                               local_path);
@@ -1167,7 +1200,9 @@ static void playback_task_network_audio_result(const char *download_url,
         taskENTER_CRITICAL(&s_audio_result_lock);
         memset(&s_audio_result, 0, sizeof(s_audio_result));
         taskEXIT_CRITICAL(&s_audio_result_lock);
-        ESP_LOGW(TAG, "Timed out waiting for playback task to consume audio result path=%s", local_path);
+        ESP_LOGW(TAG, "Timed out waiting for playback task to consume audio result requestUrl=%s path=%s",
+                 request_url,
+                 local_path == NULL ? "" : local_path);
     }
 }
 

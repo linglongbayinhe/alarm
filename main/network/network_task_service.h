@@ -14,7 +14,9 @@ typedef void (*network_task_json_result_cb_t)(esp_err_t ret,
                                               const char *json,
                                               size_t json_len,
                                               void *ctx);
-typedef void (*network_task_audio_cache_result_cb_t)(const char *download_url,
+typedef void (*network_task_audio_cache_result_cb_t)(const char *request_url,
+                                                     const char *canonical_url,
+                                                     const char *audio_id,
                                                      esp_err_t ret,
                                                      const char *local_path,
                                                      void *ctx);
