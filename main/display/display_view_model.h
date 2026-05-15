@@ -26,18 +26,12 @@ typedef struct {
 
 #define DISPLAY_WEATHER_TEMPERATURE_TEXT_SIZE 12
 #define DISPLAY_WEATHER_CONDITION_TEXT_SIZE  64
-#define DISPLAY_WEATHER_DETAILS_TEXT_SIZE    32
-#define DISPLAY_WEATHER_FOOTER_TEXT_SIZE     24
 
 typedef struct display_weather_panel {
     bool visible;
-    bool stale;
-    bool show_condition_text;
     weather_icon_kind_t icon;
     char temperature_text[DISPLAY_WEATHER_TEMPERATURE_TEXT_SIZE];
     char condition_text[DISPLAY_WEATHER_CONDITION_TEXT_SIZE];
-    char details_text[DISPLAY_WEATHER_DETAILS_TEXT_SIZE];
-    char footer_text[DISPLAY_WEATHER_FOOTER_TEXT_SIZE];
 } display_weather_panel_t;
 
 typedef struct {

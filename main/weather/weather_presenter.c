@@ -2,7 +2,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 
 static void weather_presenter_copy_text(char *destination, size_t destination_size, const char *source)
 {
@@ -72,36 +71,6 @@ static const char *weather_presenter_condition_text(const weather_snapshot_t *sn
     return weather_presenter_condition_fallback_text(snapshot->condition);
 }
 
-static bool weather_presenter_should_show_condition_text(const weather_snapshot_t *snapshot)
-{
-    if ((snapshot->state == WEATHER_DATA_STATE_LOADING) ||
-        (snapshot->state == WEATHER_DATA_STATE_ERROR)) {
-        return true;
-    }
-
-    switch (snapshot->condition) {
-        case WEATHER_CONDITION_LIGHT_RAIN:
-        case WEATHER_CONDITION_MODERATE_RAIN:
-        case WEATHER_CONDITION_HEAVY_RAIN:
-        case WEATHER_CONDITION_SHOWER:
-        case WEATHER_CONDITION_THUNDERSTORM:
-        case WEATHER_CONDITION_SNOW:
-        case WEATHER_CONDITION_FOG:
-        case WEATHER_CONDITION_HAZE:
-        case WEATHER_CONDITION_DUST_STORM:
-        case WEATHER_CONDITION_WINDY:
-        case WEATHER_CONDITION_UNKNOWN:
-            return true;
-        case WEATHER_CONDITION_CLEAR_DAY:
-        case WEATHER_CONDITION_CLEAR_NIGHT:
-        case WEATHER_CONDITION_CLOUDY_DAY:
-        case WEATHER_CONDITION_CLOUDY_NIGHT:
-        case WEATHER_CONDITION_OVERCAST:
-        default:
-            return false;
-    }
-}
-
 static void weather_presenter_format_temperature(const weather_snapshot_t *snapshot,
                                                  char *buffer,
                                                  size_t buffer_size)
@@ -112,89 +81,6 @@ static void weather_presenter_format_temperature(const weather_snapshot_t *snaps
     }
 
     snprintf(buffer, buffer_size, "%dC", (int)snapshot->current_temperature_c);
-}
-
-static void weather_presenter_format_details(const weather_snapshot_t *snapshot,
-                                             char *buffer,
-                                             size_t buffer_size)
-{
-    char range_text[16] = {0};
-    char humidity_text[16] = {0};
-
-    if (snapshot->has_daily_range) {
-        snprintf(range_text,
-                 sizeof(range_text),
-                 "H%d L%d",
-                 (int)snapshot->high_temperature_c,
-                 (int)snapshot->low_temperature_c);
-    }
-
-    if (snapshot->has_humidity) {
-        snprintf(humidity_text,
-                 sizeof(humidity_text),
-                 "HUM %u%%",
-                 (unsigned int)snapshot->humidity_percent);
-    }
-
-    if ((range_text[0] != '\0') && (humidity_text[0] != '\0')) {
-        snprintf(buffer, buffer_size, "%s %s", range_text, humidity_text);
-    } else if (range_text[0] != '\0') {
-        weather_presenter_copy_text(buffer, buffer_size, range_text);
-    } else if (humidity_text[0] != '\0') {
-        weather_presenter_copy_text(buffer, buffer_size, humidity_text);
-    } else {
-        buffer[0] = '\0';
-    }
-}
-
-static void weather_presenter_format_footer(const weather_snapshot_t *snapshot,
-                                            char *buffer,
-                                            size_t buffer_size)
-{
-    struct tm local_time = {0};
-
-    switch (snapshot->state) {
-        case WEATHER_DATA_STATE_LOADING:
-            weather_presenter_copy_text(buffer, buffer_size, "WAITING DATA");
-            return;
-        case WEATHER_DATA_STATE_ERROR:
-            weather_presenter_copy_text(buffer, buffer_size, "RETRY PENDING");
-            return;
-        case WEATHER_DATA_STATE_STALE:
-            if (!snapshot->has_update_time) {
-                weather_presenter_copy_text(buffer, buffer_size, "OFFLINE CACHE");
-                return;
-            }
-            if (localtime_r(&snapshot->updated_at_utc, &local_time) == NULL) {
-                weather_presenter_copy_text(buffer, buffer_size, "OFFLINE CACHE");
-                return;
-            }
-            snprintf(buffer,
-                     buffer_size,
-                     "STALE %02d:%02d",
-                     local_time.tm_hour,
-                     local_time.tm_min);
-            return;
-        case WEATHER_DATA_STATE_READY:
-            if (!snapshot->has_update_time) {
-                buffer[0] = '\0';
-                return;
-            }
-            if (localtime_r(&snapshot->updated_at_utc, &local_time) == NULL) {
-                buffer[0] = '\0';
-                return;
-            }
-            snprintf(buffer,
-                     buffer_size,
-                     "UPDATED %02d:%02d",
-                     local_time.tm_hour,
-                     local_time.tm_min);
-            return;
-        case WEATHER_DATA_STATE_EMPTY:
-        default:
-            buffer[0] = '\0';
-            return;
-    }
 }
 
 esp_err_t weather_presenter_build_panel_model(const weather_snapshot_t *snapshot,
@@ -211,9 +97,7 @@ esp_err_t weather_presenter_build_panel_model(const weather_snapshot_t *snapshot
     }
 
     output->visible = true;
-    output->stale = (snapshot->state == WEATHER_DATA_STATE_STALE);
     output->icon = weather_presenter_map_icon(snapshot);
-    output->show_condition_text = weather_presenter_should_show_condition_text(snapshot);
 
     if (snapshot->state == WEATHER_DATA_STATE_LOADING) {
         output->icon = WEATHER_ICON_UNKNOWN;
@@ -223,9 +107,6 @@ esp_err_t weather_presenter_build_panel_model(const weather_snapshot_t *snapshot
         weather_presenter_copy_text(output->condition_text,
                                     sizeof(output->condition_text),
                                     "LOADING");
-        weather_presenter_copy_text(output->footer_text,
-                                    sizeof(output->footer_text),
-                                    "WAITING DATA");
         return ESP_OK;
     }
 
@@ -237,9 +118,6 @@ esp_err_t weather_presenter_build_panel_model(const weather_snapshot_t *snapshot
         weather_presenter_copy_text(output->condition_text,
                                     sizeof(output->condition_text),
                                     "NO DATA");
-        weather_presenter_copy_text(output->footer_text,
-                                    sizeof(output->footer_text),
-                                    "RETRY PENDING");
         return ESP_OK;
     }
 
@@ -249,12 +127,6 @@ esp_err_t weather_presenter_build_panel_model(const weather_snapshot_t *snapshot
     weather_presenter_copy_text(output->condition_text,
                                 sizeof(output->condition_text),
                                 weather_presenter_condition_text(snapshot));
-    weather_presenter_format_details(snapshot,
-                                     output->details_text,
-                                     sizeof(output->details_text));
-    weather_presenter_format_footer(snapshot,
-                                    output->footer_text,
-                                    sizeof(output->footer_text));
 
     return ESP_OK;
 }

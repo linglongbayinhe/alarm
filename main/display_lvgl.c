@@ -9,7 +9,7 @@
 #include "esp_lvgl_port.h"
 #include "lvgl.h"
 #include "ui.h"
-#include "ui_bridge.h"
+#include "display_lvgl_renderer.h"
 
 static const char *TAG = "display_lvgl";
 
@@ -69,7 +69,7 @@ esp_err_t display_lvgl_init(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_ha
     display_lvgl_fill_panel_solid(panel, DISPLAY_LVGL_STARTUP_CLEAR_RGB565);
 
     ui_init();
-    ui_bridge_init();
+    display_lvgl_renderer_init();
 
     {
         lv_obj_t *scr = lv_display_get_screen_active(s_lvgl_disp);

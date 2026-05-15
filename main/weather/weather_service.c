@@ -169,9 +169,6 @@ static esp_err_t weather_service_parse_response(const char *json, weather_snapsh
     const cJSON *temperature = NULL;
     const cJSON *weather_icon = NULL;
     const cJSON *weather_text = NULL;
-    const cJSON *target_volume = NULL;
-    const cJSON *current_volume = NULL;
-    const cJSON *volume_level = NULL;
     weather_condition_t condition = WEATHER_CONDITION_UNKNOWN;
 
     if ((json == NULL) || (snapshot == NULL)) {
@@ -193,9 +190,6 @@ static esp_err_t weather_service_parse_response(const char *json, weather_snapsh
     temperature = cJSON_GetObjectItemCaseSensitive(root, "temperature");
     weather_icon = cJSON_GetObjectItemCaseSensitive(root, "weatherIcon");
     weather_text = cJSON_GetObjectItemCaseSensitive(root, "weatherText");
-    target_volume = cJSON_GetObjectItemCaseSensitive(root, "targetVolume");
-    current_volume = cJSON_GetObjectItemCaseSensitive(root, "currentVolume");
-    volume_level = cJSON_GetObjectItemCaseSensitive(root, "volumeLevel");
 
     if (!cJSON_IsNumber(temperature)) {
         ESP_LOGE(TAG, "Device service JSON missing numeric temperature");
@@ -228,25 +222,12 @@ static esp_err_t weather_service_parse_response(const char *json, weather_snapsh
                                  sizeof(snapshot->weather_text),
                                  weather_text->valuestring);
     }
-    if (cJSON_IsNumber(target_volume)) {
-        snapshot->has_target_volume = true;
-        snapshot->target_volume = (int16_t)target_volume->valueint;
-    }
-    if (cJSON_IsNumber(current_volume)) {
-        snapshot->has_current_volume = true;
-        snapshot->current_volume = (int16_t)current_volume->valueint;
-    }
-    if (cJSON_IsNumber(volume_level)) {
-        snapshot->has_volume_level = true;
-        snapshot->volume_level = (int16_t)volume_level->valueint;
-    }
 
     ESP_LOGI(TAG,
-             "Parsed display state: temperature=%d, weatherIcon=%s, weatherText=%s, volume=%d",
+             "Parsed weather state: temperature=%d, weatherIcon=%s, weatherText=%s",
              (int)snapshot->current_temperature_c,
              snapshot->weather_icon_text,
-             snapshot->has_weather_text ? snapshot->weather_text : "",
-             snapshot->has_volume_level ? (int)snapshot->volume_level : -1);
+             snapshot->has_weather_text ? snapshot->weather_text : "");
     ret = ESP_OK;
 
 cleanup:

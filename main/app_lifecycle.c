@@ -38,7 +38,6 @@
 #include "status_presenter.h"
 #include "storage_service.h"
 #include "time_service.h"
-#include "ui_bridge.h"
 #include "weather_service.h"
 
 #ifndef CONFIG_SOC_BLUFI_SUPPORTED
@@ -544,8 +543,6 @@ static void app_ui_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
-
-        ui_bridge_set_view_model(&view_model);
 
         ret = display_service_render(&view_model);
         if (ret != ESP_OK) {

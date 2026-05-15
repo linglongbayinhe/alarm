@@ -18,6 +18,7 @@
 #include "esp_lcd_panel_st7789.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_log.h"
+#include "display_lvgl_renderer.h"
 
 static const char *TAG = "DISPLAY_SERVICE";
 static const char *DATE_PLACEHOLDER = "----.--.--";
@@ -243,6 +244,7 @@ esp_err_t display_service_render(const display_view_model_t *view_model)
     }
 
     if (display_lvgl_is_active()) {
+        display_lvgl_renderer_set_view_model(view_model);
         return ESP_OK;
     }
 
