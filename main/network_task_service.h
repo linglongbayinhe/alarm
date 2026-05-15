@@ -60,5 +60,7 @@ void network_task_service_request_playback_report(const char *instance_id,
                                                   const char *status,
                                                   const char *audio_status);
 void network_task_service_reset_sessions(void);
+void network_task_service_set_https_suspended(bool suspended);
+bool network_task_service_wait_idle(uint32_t timeout_ms);
 
 #endif

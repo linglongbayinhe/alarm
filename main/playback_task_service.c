@@ -37,6 +37,7 @@ static const char *PLAYBACK_TASK_BLOB_KEY = "tasks_v1";
 #define PLAYBACK_TASK_TIME_WAIT_MS                5000
 #define PLAYBACK_TASK_SAVE_DELAY_MS               3000
 #define PLAYBACK_TASK_DEFAULT_VOLUME_PERCENT      50
+#define PLAYBACK_TASK_NETWORK_IDLE_WAIT_MS        2000
 
 typedef struct {
     uint32_t magic;
@@ -838,6 +839,10 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
 
     task->task_status = PLAYBACK_TASK_STATUS_PLAYING;
 
+    network_task_service_set_https_suspended(true);
+    network_task_service_reset_sessions();
+    (void)network_task_service_wait_idle(PLAYBACK_TASK_NETWORK_IDLE_WAIT_MS);
+
     playback_task_copy_string(s_current_playing_path, sizeof(s_current_playing_path), play_path);
     ret = audio_service_play(play_path, format, s_current_volume_percent, 0);
     s_current_playing_path[0] = '\0';
@@ -856,6 +861,7 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
                                  0);
         s_current_playing_path[0] = '\0';
     }
+    network_task_service_set_https_suspended(false);
 
     if (ret == ESP_OK) {
         task->task_status = PLAYBACK_TASK_STATUS_FINISHED;

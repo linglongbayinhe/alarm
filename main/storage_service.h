@@ -6,7 +6,7 @@
 #include "esp_err.h"
 
 #define STORAGE_SERVICE_INTERNAL_BASE_PATH "/spiffs"
-#define STORAGE_SERVICE_DEFAULT_AUDIO_PATH "/spiffs/default_alarm.wav"
+#define STORAGE_SERVICE_DEFAULT_AUDIO_PATH "/spiffs/default_alarm.mp3"
 #define STORAGE_SERVICE_EXTERNAL_BASE_PATH "/ext"
 #define STORAGE_SERVICE_EXTERNAL_AUDIO_DIR "/ext/audio"
 

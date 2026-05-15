@@ -24,6 +24,8 @@ static const char *TAG = "NETWORK_TASK";
 #define NETWORK_TASK_HTTPS_HEAP_LARGEST_MIN  15000
 #define NETWORK_TASK_NOTIFY_WORK             BIT0
 #define NETWORK_TASK_NOTIFY_RESET_SESSION    BIT1
+#define NETWORK_TASK_SUSPENDED_WAIT_MS       100
+#define NETWORK_TASK_IDLE_WAIT_STEP_MS       20
 
 typedef enum {
     NETWORK_TASK_JOB_NONE = 0,
@@ -82,6 +84,9 @@ static network_task_startup_pull_done_cb_t s_startup_pull_done_handler;
 static void *s_startup_pull_done_handler_ctx;
 static network_task_startup_weather_done_cb_t s_startup_weather_done_handler;
 static void *s_startup_weather_done_handler_ctx;
+static bool s_https_suspended;
+static bool s_active_job_busy;
+static network_task_job_type_t s_active_job_type;
 
 static void network_task_copy_string(char *destination, size_t destination_size, const char *source)
 {
@@ -120,6 +125,25 @@ static void network_task_unlock(void)
     if (s_lock != NULL) {
         xSemaphoreGive(s_lock);
     }
+}
+
+static bool network_task_https_suspended(void)
+{
+    bool suspended = false;
+
+    network_task_lock();
+    suspended = s_https_suspended;
+    network_task_unlock();
+
+    return suspended;
+}
+
+static void network_task_set_active_job(network_task_job_type_t type)
+{
+    network_task_lock();
+    s_active_job_type = type;
+    s_active_job_busy = (type != NETWORK_TASK_JOB_NONE);
+    network_task_unlock();
 }
 
 static bool network_task_https_heap_ready(const char *job_name)
@@ -628,10 +652,22 @@ static void network_task_worker(void *arg)
             network_task_reset_session(&session, response_buffer, NETWORK_TASK_RESPONSE_BYTES);
         }
 
+        if (network_task_https_suspended()) {
+            xTaskNotifyWait(0,
+                            UINT32_MAX,
+                            &notify_bits,
+                            pdMS_TO_TICKS(NETWORK_TASK_SUSPENDED_WAIT_MS));
+            if ((notify_bits & NETWORK_TASK_NOTIFY_RESET_SESSION) != 0U) {
+                network_task_reset_session(&session, response_buffer, NETWORK_TASK_RESPONSE_BYTES);
+            }
+            continue;
+        }
+
         if (!network_task_take_next_job(&job)) {
             continue;
         }
 
+        network_task_set_active_job(job.type);
         switch (job.type) {
         case NETWORK_TASK_JOB_ALARM_REPORT:
             network_task_execute_report(&session,
@@ -663,6 +699,7 @@ static void network_task_worker(void *arg)
         default:
             break;
         }
+        network_task_set_active_job(NETWORK_TASK_JOB_NONE);
     }
 }
 
@@ -910,5 +947,54 @@ void network_task_service_reset_sessions(void)
 {
     if (s_task_handle != NULL) {
         xTaskNotify(s_task_handle, NETWORK_TASK_NOTIFY_RESET_SESSION, eSetBits);
+    }
+}
+
+void network_task_service_set_https_suspended(bool suspended)
+{
+    bool changed = false;
+
+    network_task_lock();
+    if (s_https_suspended != suspended) {
+        s_https_suspended = suspended;
+        changed = true;
+    }
+    network_task_unlock();
+
+    if (changed) {
+        if (suspended) {
+            ESP_LOGI(TAG, "HTTPS suspended for local playback");
+        } else {
+            ESP_LOGI(TAG, "HTTPS resumed after local playback");
+        }
+    }
+    network_task_notify();
+}
+
+bool network_task_service_wait_idle(uint32_t timeout_ms)
+{
+    TickType_t start_tick = xTaskGetTickCount();
+    TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+
+    while (true) {
+        bool busy = false;
+        network_task_job_type_t active_job = NETWORK_TASK_JOB_NONE;
+
+        network_task_lock();
+        busy = s_active_job_busy;
+        active_job = s_active_job_type;
+        network_task_unlock();
+
+        if (!busy) {
+            return true;
+        }
+        if ((timeout_ms == 0U) || ((xTaskGetTickCount() - start_tick) >= timeout_ticks)) {
+            ESP_LOGW(TAG,
+                     "Network task still busy before playback: job=%d",
+                     (int)active_job);
+            return false;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(NETWORK_TASK_IDLE_WAIT_STEP_MS));
     }
 }
