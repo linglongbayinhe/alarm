@@ -15,12 +15,16 @@
 #include "esp_log.h"
 
 #define AUDIO_SERVICE_BCLK GPIO_NUM_14
-#define AUDIO_SERVICE_WS   GPIO_NUM_13
+#define AUDIO_SERVICE_WS   GPIO_NUM_12
 #define AUDIO_SERVICE_DOUT GPIO_NUM_19
 #define AUDIO_SERVICE_INPUT_BUFFER_BYTES 4096
 #define AUDIO_SERVICE_DECODER_INPUT_BYTES 1024
-#define AUDIO_SERVICE_DECODER_OUTPUT_BYTES 8192
+#define AUDIO_SERVICE_DECODER_OUTPUT_BYTES 4096
+#define AUDIO_SERVICE_STEREO_CHUNK_FRAMES 512
+#define AUDIO_SERVICE_STEREO_CHUNK_SAMPLES (AUDIO_SERVICE_STEREO_CHUNK_FRAMES * 2U)
 #define AUDIO_SERVICE_TAIL_SILENCE_SAMPLES 512
+#define AUDIO_SERVICE_DEFAULT_SAMPLE_RATE 16000
+#define AUDIO_SERVICE_I2S_WRITE_TIMEOUT_MS 1000
 
 static const char *TAG = "AUDIO_SERVICE";
 
@@ -46,6 +50,58 @@ static void audio_service_log_heap(const char *stage)
              stage == NULL ? "unknown" : stage,
              (unsigned int)heap_caps_get_free_size(MALLOC_CAP_8BIT),
              (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+}
+
+static void audio_service_log_mp3_state(const char *stage,
+                                        uint32_t output_buffer_size,
+                                        size_t stereo_buffer_samples)
+{
+    ESP_LOGW(TAG,
+             "MP3 %s: free=%u largest=%u output=%u stereo_chunk=%u",
+             stage == NULL ? "unknown" : stage,
+             (unsigned int)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             (unsigned int)output_buffer_size,
+             (unsigned int)(stereo_buffer_samples * sizeof(int16_t)));
+}
+
+static esp_err_t audio_service_write_i2s(const void *buffer, size_t write_size)
+{
+    size_t written = 0;
+    esp_err_t ret = ESP_OK;
+
+    if ((buffer == NULL) || (write_size == 0U)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ret = i2s_channel_write(s_tx_channel,
+                            buffer,
+                            write_size,
+                            &written,
+                            pdMS_TO_TICKS(AUDIO_SERVICE_I2S_WRITE_TIMEOUT_MS));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "I2S write failed: ret=%s requested=%u written=%u timeout_ms=%u enabled=%d rate=%" PRIu32,
+                 esp_err_to_name(ret),
+                 (unsigned int)write_size,
+                 (unsigned int)written,
+                 (unsigned int)AUDIO_SERVICE_I2S_WRITE_TIMEOUT_MS,
+                 s_channel_enabled ? 1 : 0,
+                 s_current_sample_rate);
+        return ret;
+    }
+    if (written != write_size) {
+        ESP_LOGW(TAG,
+                 "I2S short write: requested=%u written=%u timeout_ms=%u enabled=%d rate=%" PRIu32,
+                 (unsigned int)write_size,
+                 (unsigned int)written,
+                 (unsigned int)AUDIO_SERVICE_I2S_WRITE_TIMEOUT_MS,
+                 s_channel_enabled ? 1 : 0,
+                 s_current_sample_rate);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    return ESP_OK;
 }
 
 static uint16_t audio_service_read_u16_le(const uint8_t *buffer)
@@ -122,6 +178,8 @@ static esp_err_t audio_service_ensure_i2s(uint32_t sample_rate)
 
         ret = i2s_channel_init_std_mode(s_tx_channel, &std_config);
         if (ret != ESP_OK) {
+            (void)i2s_del_channel(s_tx_channel);
+            s_tx_channel = NULL;
             return ret;
         }
 
@@ -152,11 +210,14 @@ static esp_err_t audio_service_ensure_i2s(uint32_t sample_rate)
     }
 
     if (!s_channel_enabled) {
+        ESP_LOGI(TAG, "I2S enabling: sample_rate=%" PRIu32, s_current_sample_rate);
         ret = i2s_channel_enable(s_tx_channel);
         if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "I2S enable failed: %s", esp_err_to_name(ret));
             return ret;
         }
         s_channel_enabled = true;
+        ESP_LOGI(TAG, "I2S enabled: sample_rate=%" PRIu32, s_current_sample_rate);
     }
 
     return ESP_OK;
@@ -263,7 +324,7 @@ static esp_err_t audio_service_write_pcm_16(int16_t *pcm_samples,
                                             uint64_t max_frames)
 {
     size_t write_size = 0;
-    size_t written = 0;
+    esp_err_t ret = ESP_OK;
 
     if ((pcm_samples == NULL) || ((channels != 1U) && (channels != 2U))) {
         return ESP_ERR_INVALID_ARG;
@@ -273,23 +334,41 @@ static esp_err_t audio_service_write_pcm_16(int16_t *pcm_samples,
 
     if (channels == 1U) {
         size_t frame_count = sample_count;
-        size_t frame_index = 0;
+        size_t frame_offset = 0;
+        size_t stereo_chunk_frames = 0;
 
         if ((max_frames > 0U) && ((*frames_written + frame_count) > max_frames)) {
             frame_count = (size_t)(max_frames - *frames_written);
         }
-        if ((stereo_buffer == NULL) || (stereo_buffer_samples < (frame_count * 2U))) {
+        if ((stereo_buffer == NULL) || (stereo_buffer_samples < 2U)) {
             return ESP_ERR_INVALID_SIZE;
         }
 
-        for (frame_index = 0; frame_index < frame_count; ++frame_index) {
-            stereo_buffer[frame_index * 2U] = pcm_samples[frame_index];
-            stereo_buffer[(frame_index * 2U) + 1U] = pcm_samples[frame_index];
+        stereo_chunk_frames = stereo_buffer_samples / 2U;
+        while (frame_offset < frame_count) {
+            size_t chunk_frames = frame_count - frame_offset;
+            size_t frame_index = 0;
+
+            if (chunk_frames > stereo_chunk_frames) {
+                chunk_frames = stereo_chunk_frames;
+            }
+
+            for (frame_index = 0; frame_index < chunk_frames; ++frame_index) {
+                int16_t sample = pcm_samples[frame_offset + frame_index];
+                stereo_buffer[frame_index * 2U] = sample;
+                stereo_buffer[(frame_index * 2U) + 1U] = sample;
+            }
+
+            write_size = chunk_frames * sizeof(int16_t) * 2U;
+            ret = audio_service_write_i2s(stereo_buffer, write_size);
+            if (ret != ESP_OK) {
+                return ret;
+            }
+            *frames_written += chunk_frames;
+            frame_offset += chunk_frames;
         }
 
-        write_size = frame_count * sizeof(int16_t) * 2U;
-        *frames_written += frame_count;
-        return i2s_channel_write(s_tx_channel, stereo_buffer, write_size, &written, portMAX_DELAY);
+        return ESP_OK;
     }
 
     if ((max_frames > 0U) && ((*frames_written + (sample_count / 2U)) > max_frames)) {
@@ -298,12 +377,11 @@ static esp_err_t audio_service_write_pcm_16(int16_t *pcm_samples,
 
     *frames_written += sample_count / 2U;
     write_size = sample_count * sizeof(int16_t);
-    return i2s_channel_write(s_tx_channel, pcm_samples, write_size, &written, portMAX_DELAY);
+    return audio_service_write_i2s(pcm_samples, write_size);
 }
 
 static void audio_service_finish_output(void)
 {
-    size_t written = 0;
     int16_t silence_buffer[AUDIO_SERVICE_TAIL_SILENCE_SAMPLES] = {0};
 
     if (!s_i2s_ready || (s_tx_channel == NULL) || !s_channel_enabled) {
@@ -311,11 +389,7 @@ static void audio_service_finish_output(void)
     }
 
     // Push a short silence tail so the amp does not hold the last decoded sample.
-    (void)i2s_channel_write(s_tx_channel,
-                            silence_buffer,
-                            sizeof(silence_buffer),
-                            &written,
-                            portMAX_DELAY);
+    (void)audio_service_write_i2s(silence_buffer, sizeof(silence_buffer));
     if (i2s_channel_disable(s_tx_channel) == ESP_OK) {
         s_channel_enabled = false;
     }
@@ -371,7 +445,7 @@ static esp_err_t audio_service_play_wav(const char *path, uint8_t volume_percent
     }
 
     if (info.channels == 1) {
-        stereo_buffer = calloc(1, AUDIO_SERVICE_INPUT_BUFFER_BYTES * 2);
+        stereo_buffer = calloc(AUDIO_SERVICE_STEREO_CHUNK_SAMPLES, sizeof(*stereo_buffer));
         if (stereo_buffer == NULL) {
             free(input_buffer);
             fclose(file);
@@ -405,7 +479,7 @@ static esp_err_t audio_service_play_wav(const char *path, uint8_t volume_percent
                                              1,
                                              volume_percent,
                                              stereo_buffer,
-                                             AUDIO_SERVICE_INPUT_BUFFER_BYTES,
+                                             AUDIO_SERVICE_STEREO_CHUNK_SAMPLES,
                                              &frames_written,
                                              max_frames);
             if ((max_frames > 0) && (frames_written >= max_frames)) {
@@ -479,7 +553,7 @@ static esp_err_t audio_service_play_mp3(const char *path, uint8_t volume_percent
     audio_service_log_heap("mp3_before_buffers");
     input_buffer = calloc(1, AUDIO_SERVICE_DECODER_INPUT_BYTES);
     output_buffer = calloc(1, output_buffer_size);
-    stereo_buffer = calloc(1, output_buffer_size * 2U);
+    stereo_buffer = calloc(AUDIO_SERVICE_STEREO_CHUNK_SAMPLES, sizeof(*stereo_buffer));
     if ((input_buffer == NULL) || (output_buffer == NULL) || (stereo_buffer == NULL)) {
         audio_service_log_heap("mp3_buffer_alloc_failed");
         ret = ESP_ERR_NO_MEM;
@@ -489,8 +563,10 @@ static esp_err_t audio_service_play_mp3(const char *path, uint8_t volume_percent
              "MP3 buffers allocated: input=%u output=%u stereo=%u total=%u",
              (unsigned int)AUDIO_SERVICE_DECODER_INPUT_BYTES,
              (unsigned int)output_buffer_size,
-             (unsigned int)(output_buffer_size * 2U),
-             (unsigned int)(AUDIO_SERVICE_DECODER_INPUT_BYTES + output_buffer_size + (output_buffer_size * 2U)));
+             (unsigned int)(AUDIO_SERVICE_STEREO_CHUNK_SAMPLES * sizeof(*stereo_buffer)),
+             (unsigned int)(AUDIO_SERVICE_DECODER_INPUT_BYTES +
+                            output_buffer_size +
+                            (AUDIO_SERVICE_STEREO_CHUNK_SAMPLES * sizeof(*stereo_buffer))));
     audio_service_log_heap("mp3_after_buffers");
 
     if ((max_duration_ms > 0U)) {
@@ -499,7 +575,9 @@ static esp_err_t audio_service_play_mp3(const char *path, uint8_t volume_percent
 
     audio_ret = esp_audio_simple_dec_open(&decoder_config, &decoder);
     if (audio_ret != ESP_AUDIO_ERR_OK) {
-        audio_service_log_heap("mp3_decoder_open_failed");
+        audio_service_log_mp3_state("decoder_open_failed",
+                                    output_buffer_size,
+                                    AUDIO_SERVICE_STEREO_CHUNK_SAMPLES);
         ret = ESP_ERR_NOT_SUPPORTED;
         goto cleanup;
     }
@@ -530,28 +608,31 @@ static esp_err_t audio_service_play_mp3(const char *path, uint8_t volume_percent
             audio_ret = esp_audio_simple_dec_process(decoder, &raw, &frame);
             if (audio_ret == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
                 uint8_t *new_output = realloc(output_buffer, frame.needed_size);
-                int16_t *new_stereo = realloc(stereo_buffer, frame.needed_size * 2U);
 
-                if ((new_output == NULL) || (new_stereo == NULL)) {
-                    audio_service_log_heap("mp3_buffer_realloc_failed");
-                    free(new_output);
-                    free(new_stereo);
+                if (new_output == NULL) {
+                    audio_service_log_mp3_state("buffer_realloc_failed",
+                                                output_buffer_size,
+                                                AUDIO_SERVICE_STEREO_CHUNK_SAMPLES);
                     ret = ESP_ERR_NO_MEM;
                     goto cleanup;
                 }
                 output_buffer = new_output;
-                stereo_buffer = new_stereo;
                 output_buffer_size = frame.needed_size;
                 ESP_LOGI(TAG,
                          "MP3 buffers resized: output=%u stereo=%u total=%u",
                          (unsigned int)output_buffer_size,
-                         (unsigned int)(output_buffer_size * 2U),
-                         (unsigned int)(AUDIO_SERVICE_DECODER_INPUT_BYTES + output_buffer_size + (output_buffer_size * 2U)));
+                         (unsigned int)(AUDIO_SERVICE_STEREO_CHUNK_SAMPLES * sizeof(*stereo_buffer)),
+                         (unsigned int)(AUDIO_SERVICE_DECODER_INPUT_BYTES +
+                                        output_buffer_size +
+                                        (AUDIO_SERVICE_STEREO_CHUNK_SAMPLES * sizeof(*stereo_buffer))));
                 audio_service_log_heap("mp3_after_buffer_resize");
                 continue;
             }
             if ((audio_ret != ESP_AUDIO_ERR_OK) && (audio_ret != ESP_AUDIO_ERR_CONTINUE) &&
                 !(raw.eos && (audio_ret == ESP_AUDIO_ERR_DATA_LACK))) {
+                audio_service_log_mp3_state("decode_failed",
+                                            output_buffer_size,
+                                            AUDIO_SERVICE_STEREO_CHUNK_SAMPLES);
                 ret = ESP_FAIL;
                 goto cleanup;
             }
@@ -598,7 +679,7 @@ static esp_err_t audio_service_play_mp3(const char *path, uint8_t volume_percent
                                                  channels,
                                                  volume_percent,
                                                  stereo_buffer,
-                                                 output_buffer_size,
+                                                 AUDIO_SERVICE_STEREO_CHUNK_SAMPLES,
                                                  &frames_written,
                                                  max_frames);
                 if (ret != ESP_OK) {
@@ -652,10 +733,18 @@ cleanup:
 
 esp_err_t audio_service_init(void)
 {
+    esp_err_t ret = ESP_OK;
+
     if (!s_decoder_registered) {
         esp_mp3_dec_register();
         s_decoder_registered = true;
     }
+    ret = audio_service_ensure_i2s(AUDIO_SERVICE_DEFAULT_SAMPLE_RATE);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2S preinit failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    audio_service_finish_output();
     s_initialized = true;
     return ESP_OK;
 }
