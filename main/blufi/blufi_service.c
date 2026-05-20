@@ -50,6 +50,7 @@ typedef struct {
     bool password_received;
     bool connect_requested;
     bool wifi_got_ip;
+    bool pending_wifi_report;
     esp_blufi_extra_info_t conn_info;
 } blufi_service_state_t;
 
@@ -192,6 +193,7 @@ void blufi_service_reset_wifi_config_cache(void)
     s_state.ssid_received = false;
     s_state.password_received = false;
     s_state.connect_requested = false;
+    s_state.pending_wifi_report = false;
 }
 
 void blufi_service_set_sta_config(const wifi_config_t *config)
@@ -220,22 +222,32 @@ void blufi_service_record_wifi_conn_info(bool connecting, int rssi, uint8_t reas
 
 void blufi_service_on_wifi_got_ip(const blufi_service_wifi_status_t *status)
 {
-    if (status == NULL) {
-        return;
-    }
+    (void)status;
 
     s_state.wifi_got_ip = true;
-
-    if (s_state.ble_connected) {
-        blufi_service_send_wifi_status_report(status);
-    } else {
-        BLUFI_INFO("BLUFI BLE is not connected yet\n");
-    }
+    blufi_service_notify_wifi_status();
 }
 
 void blufi_service_on_wifi_disconnected(void)
 {
     s_state.wifi_got_ip = false;
+}
+
+void blufi_service_notify_wifi_status(void)
+{
+    if (s_hooks.get_wifi_status == NULL) {
+        return;
+    }
+    if (!s_state.ble_connected) {
+        s_state.pending_wifi_report = true;
+        BLUFI_INFO("Defer Wi-Fi status BLE report until peer connects\n");
+        return;
+    }
+    blufi_service_wifi_status_t status = {0};
+    if (s_hooks.get_wifi_status(s_hook_ctx, &status)) {
+        s_state.pending_wifi_report = false;
+        blufi_service_send_wifi_status_report(&status);
+    }
 }
 
 void blufi_service_send_wifi_status_report(const blufi_service_wifi_status_t *status)
@@ -382,6 +394,9 @@ static void blufi_service_event_callback(esp_blufi_cb_event_t event, esp_blufi_c
             BLUFI_ERROR("Failed to start security request: %s\n", esp_err_to_name(ret));
         }
 #endif
+        if (s_state.pending_wifi_report) {
+            blufi_service_notify_wifi_status();
+        }
         break;
     }
     case ESP_BLUFI_EVENT_BLE_DISCONNECT:
@@ -420,6 +435,7 @@ static void blufi_service_event_callback(esp_blufi_cb_event_t event, esp_blufi_c
             s_hooks.request_wifi_connect(s_hook_ctx);
         } else {
             (void)esp_wifi_connect();
+            blufi_service_notify_wifi_status();
         }
         break;
     case ESP_BLUFI_EVENT_REQ_DISCONNECT_FROM_AP:

@@ -444,6 +444,7 @@ static void app_wifi_connect(void)
     s_wifi_state.connecting = (ret == ESP_OK);
     BLUFI_INFO("WiFi connect requested: %s\n", esp_err_to_name(ret));
     app_record_wifi_conn_info(EXAMPLE_INVALID_RSSI, EXAMPLE_INVALID_REASON);
+    blufi_service_notify_wifi_status();
 }
 
 static bool app_wifi_reconnect(void)
@@ -458,6 +459,7 @@ static bool app_wifi_reconnect(void)
                    (unsigned int)s_wifi_retry,
                    (unsigned int)EXAMPLE_WIFI_CONNECTION_MAXIMUM_RETRY);
         app_record_wifi_conn_info(EXAMPLE_INVALID_RSSI, EXAMPLE_INVALID_REASON);
+        blufi_service_notify_wifi_status();
         ret = true;
     } else {
         ret = false;
@@ -544,10 +546,11 @@ static void app_wifi_event_handler(void* arg, esp_event_base_t event_base,
                    s_wifi_state.connecting ? 1 : 0,
                    (unsigned int)s_wifi_retry,
                    (unsigned int)EXAMPLE_WIFI_CONNECTION_MAXIMUM_RETRY);
-        /* Only handle reconnection during connecting */
-        if (s_wifi_state.connected == false && app_wifi_reconnect() == false) {
+        /* Stop retrying only while we are still in the association attempt phase */
+        if (s_wifi_state.connecting && !app_wifi_reconnect()) {
             s_wifi_state.connecting = false;
             app_record_wifi_conn_info(disconnected_event->rssi, disconnected_event->reason);
+            blufi_service_notify_wifi_status();
             if (blufi_service_can_start()) {
                 BLUFI_INFO("Stored WiFi connection failed; starting BLUFI for reprovisioning\n");
                 (void)blufi_service_start();

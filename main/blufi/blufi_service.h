@@ -47,6 +47,7 @@ void blufi_service_set_sta_config(const wifi_config_t *config);
 void blufi_service_record_wifi_conn_info(bool connecting, int rssi, uint8_t reason);
 void blufi_service_on_wifi_got_ip(const blufi_service_wifi_status_t *status);
 void blufi_service_on_wifi_disconnected(void);
+void blufi_service_notify_wifi_status(void);
 void blufi_service_send_wifi_status_report(const blufi_service_wifi_status_t *status);
 void blufi_service_send_wifi_list_from_scan(void);
 
