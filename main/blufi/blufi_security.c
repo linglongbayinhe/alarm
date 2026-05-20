@@ -16,12 +16,9 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_random.h"
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
-#include "esp_bt.h"
-#endif
 
 #include "esp_blufi_api.h"
-#include "blufi_example.h"
+#include "blufi_port.h"
 
 #include "psa/crypto.h"
 #include "esp_crc.h"

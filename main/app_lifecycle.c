@@ -6,9 +6,7 @@
 
 
 #include <assert.h>
-#include <inttypes.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -19,15 +17,11 @@
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
-#include "esp_bt.h"
-#endif
 
 #include "app_lifecycle.h"
-#include "esp_blufi_api.h"
-#include "blufi_example.h"
+#include "blufi_service.h"
+#include "blufi_port.h"
 
-#include "esp_blufi.h"
 #include "audio_cache_service.h"
 #include "audio_service.h"
 #include "device_cloud_service.h"
@@ -48,48 +42,25 @@
 #define EXAMPLE_INVALID_REASON                255
 #define EXAMPLE_INVALID_RSSI                  -128
 
-#if CONFIG_ESP_WIFI_AUTH_OPEN
-#define EXAMPLE_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_OPEN
-#elif CONFIG_ESP_WIFI_AUTH_WEP
-#define EXAMPLE_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WEP
-#elif CONFIG_ESP_WIFI_AUTH_WPA_PSK
-#define EXAMPLE_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA_PSK
-#elif CONFIG_ESP_WIFI_AUTH_WPA2_PSK
-#define EXAMPLE_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA2_PSK
-#elif CONFIG_ESP_WIFI_AUTH_WPA_WPA2_PSK
-#define EXAMPLE_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA_WPA2_PSK
-#elif CONFIG_ESP_WIFI_AUTH_WPA3_PSK
-#define EXAMPLE_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA3_PSK
-#elif CONFIG_ESP_WIFI_AUTH_WPA2_WPA3_PSK
-#define EXAMPLE_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA2_WPA3_PSK
-#elif CONFIG_ESP_WIFI_AUTH_WAPI_PSK
-#define EXAMPLE_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WAPI_PSK
-#endif
-
-static void app_blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_t *param);
 static void app_ui_task(void *arg);
-static esp_err_t app_start_blufi_services(void);
 static esp_err_t app_start_display_services(const char *reason);
 static void app_schedule_runtime_transition(void);
 static void app_startup_pull_done(esp_err_t ret, void *ctx);
 static void app_startup_weather_done(esp_err_t ret, void *ctx);
+static bool app_blufi_get_wifi_status(void *ctx, blufi_service_wifi_status_t *out_status);
+static void app_blufi_schedule_runtime_transition(void *ctx);
+static void app_blufi_request_wifi_connect(void *ctx);
+static void app_blufi_request_wifi_disconnect(void *ctx);
+static void app_blufi_request_startup_playback_pull(void *ctx);
+static void app_blufi_request_startup_weather_refresh(void *ctx);
+static void app_blufi_request_weather_refresh(void *ctx);
+static void app_blufi_request_playback_sync(void *ctx);
+static void app_blufi_cloud_config_changed(void *ctx);
 
-static esp_blufi_callbacks_t app_blufi_callbacks = {
-    .event_cb = app_blufi_event_callback,
-    .negotiate_data_handler = blufi_dh_negotiate_data_handler,
-    .encrypt_func = blufi_aes_encrypt,
-    .decrypt_func = blufi_aes_decrypt,
-    .checksum_func = blufi_crc_checksum,
-};
-
-#define WIFI_LIST_NUM   10
 #define EXAMPLE_UI_TASK_STACK_SIZE 3072
 #define EXAMPLE_UI_TASK_PRIORITY   5
 #define EXAMPLE_RUNTIME_TRANSITION_TASK_STACK_SIZE 4096
 #define EXAMPLE_RUNTIME_TRANSITION_TASK_PRIORITY   4
-
-static wifi_config_t sta_config;
-static wifi_config_t ap_config;
 
 /* FreeRTOS event group to signal when we are connected & ready to make a request */
 static EventGroupHandle_t wifi_event_group;
@@ -105,23 +76,11 @@ typedef struct {
     bool connected;
     bool got_ip;
     bool connecting;
-    bool ssid_received;
-    bool password_received;
-    bool connect_requested;
     bool has_stored_config;
     uint8_t bssid[6];
     uint8_t ssid[32];
     int ssid_len;
-    wifi_sta_list_t sta_list;
-    esp_blufi_extra_info_t conn_info;
 } app_wifi_state_t;
-
-typedef struct {
-    bool ble_connected;
-    bool active;
-    bool starting;
-    bool resources_released;
-} app_blufi_state_t;
 
 typedef struct {
     bool network_started;
@@ -136,7 +95,6 @@ typedef struct {
 } app_runtime_state_t;
 
 static app_wifi_state_t s_wifi_state;
-static app_blufi_state_t s_blufi_state;
 static app_runtime_state_t s_runtime_state;
 static bool s_display_services_started = false;
 
@@ -251,83 +209,6 @@ static bool app_get_wifi_rssi(int *rssi_out)
     return true;
 }
 
-static esp_err_t app_release_blufi_resources(void)
-{
-    esp_err_t ret = ESP_OK;
-
-    if (s_blufi_state.resources_released || !s_blufi_state.active) {
-        return ESP_OK;
-    }
-    if (s_blufi_state.ble_connected) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    app_log_internal_heap("before_blufi_release");
-    esp_blufi_adv_stop();
-    blufi_security_deinit();
-
-    ret = esp_blufi_host_deinit();
-    if (ret != ESP_OK) {
-        BLUFI_ERROR("Failed to deinit BLUFI host: %s\n", esp_err_to_name(ret));
-        return ret;
-    }
-
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
-    ret = esp_blufi_controller_deinit();
-    if (ret != ESP_OK) {
-        BLUFI_ERROR("Failed to deinit BLUFI controller: %s\n", esp_err_to_name(ret));
-        return ret;
-    }
-#if CONFIG_IDF_TARGET_ESP32
-    ret = esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
-    if ((ret != ESP_OK) && (ret != ESP_ERR_INVALID_STATE)) {
-        BLUFI_ERROR("Failed to release BLE memory: %s\n", esp_err_to_name(ret));
-        return ret;
-    }
-#endif
-#endif
-
-    s_blufi_state.active = false;
-    s_blufi_state.resources_released = true;
-    app_log_internal_heap("after_blufi_release");
-    return ESP_OK;
-}
-
-static esp_err_t app_start_blufi_services(void)
-{
-    esp_err_t ret = ESP_OK;
-
-    if (s_blufi_state.active || s_blufi_state.starting) {
-        return ESP_OK;
-    }
-    if (s_blufi_state.resources_released) {
-        BLUFI_ERROR("BLUFI memory was already released; restart is required for BLUFI\n");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    s_blufi_state.starting = true;
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
-    app_log_internal_heap("before_blufi_controller_init");
-    ret = esp_blufi_controller_init();
-    if (ret != ESP_OK) {
-        s_blufi_state.starting = false;
-        BLUFI_ERROR("BLUFI controller init failed: %s\n", esp_err_to_name(ret));
-        return ret;
-    }
-#endif
-
-    app_log_internal_heap("before_blufi_host_init");
-    ret = esp_blufi_host_and_cb_init(&app_blufi_callbacks);
-    if (ret != ESP_OK) {
-        s_blufi_state.starting = false;
-        BLUFI_ERROR("BLUFI host init failed: %s\n", esp_err_to_name(ret));
-        return ret;
-    }
-    app_log_internal_heap("after_blufi_host_init");
-    BLUFI_INFO("BLUFI VERSION %04x\n", esp_blufi_get_version());
-    return ESP_OK;
-}
-
 static esp_err_t app_start_display_services(const char *reason)
 {
     BaseType_t task_created;
@@ -374,12 +255,10 @@ static esp_err_t app_start_runtime_services(void)
     if (!s_wifi_state.got_ip) {
         return ESP_ERR_INVALID_STATE;
     }
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
-    if (s_blufi_state.active && !s_blufi_state.resources_released) {
+    if (blufi_service_is_runtime_blocked()) {
         BLUFI_INFO("Deferring runtime service start until BLUFI memory is released\n");
         return ESP_ERR_INVALID_STATE;
     }
-#endif
 
     if (!s_runtime_state.network_started) {
         app_log_internal_heap("before_network_start");
@@ -459,14 +338,12 @@ static void app_runtime_transition_task(void *arg)
 
     (void)arg;
 
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
-    if (s_wifi_state.got_ip && s_blufi_state.active && !s_blufi_state.ble_connected && !s_blufi_state.resources_released) {
-        ret = app_release_blufi_resources();
+    if (s_wifi_state.got_ip) {
+        ret = blufi_service_release_if_ready();
         if (ret != ESP_OK) {
             BLUFI_ERROR("Deferred BLUFI release failed: %s\n", esp_err_to_name(ret));
         }
     }
-#endif
 
     if (s_wifi_state.got_ip) {
         ret = app_start_runtime_services();
@@ -555,16 +432,7 @@ static void app_ui_task(void *arg)
 
 static void app_record_wifi_conn_info(int rssi, uint8_t reason)
 {
-    memset(&s_wifi_state.conn_info, 0, sizeof(esp_blufi_extra_info_t));
-    if (s_wifi_state.connecting) {
-        s_wifi_state.conn_info.sta_max_conn_retry_set = true;
-        s_wifi_state.conn_info.sta_max_conn_retry = EXAMPLE_WIFI_CONNECTION_MAXIMUM_RETRY;
-    } else {
-        s_wifi_state.conn_info.sta_conn_rssi_set = true;
-        s_wifi_state.conn_info.sta_conn_rssi = rssi;
-        s_wifi_state.conn_info.sta_conn_end_reason_set = true;
-        s_wifi_state.conn_info.sta_conn_end_reason = reason;
-    }
+    blufi_service_record_wifi_conn_info(s_wifi_state.connecting, rssi, reason);
 }
 
 static void app_wifi_connect(void)
@@ -597,45 +465,35 @@ static bool app_wifi_reconnect(void)
     return ret;
 }
 
-static int app_softap_get_current_connection_number(void)
+static void app_build_blufi_wifi_status(blufi_service_wifi_status_t *out_status)
 {
-    esp_err_t ret;
-    ret = esp_wifi_ap_get_sta_list(&s_wifi_state.sta_list);
-    if (ret == ESP_OK)
-    {
-        return s_wifi_state.sta_list.num;
+    if (out_status == NULL) {
+        return;
     }
 
-    return 0;
+    memset(out_status, 0, sizeof(*out_status));
+    out_status->connected = s_wifi_state.connected;
+    out_status->got_ip = s_wifi_state.got_ip;
+    out_status->connecting = s_wifi_state.connecting;
+    memcpy(out_status->bssid, s_wifi_state.bssid, sizeof(out_status->bssid));
+    memcpy(out_status->ssid, s_wifi_state.ssid, sizeof(out_status->ssid));
+    out_status->ssid_len = s_wifi_state.ssid_len;
 }
 
 static void app_ip_event_handler(void* arg, esp_event_base_t event_base,
                                 int32_t event_id, void* event_data)
 {
-    wifi_mode_t mode;
-
     switch (event_id) {
     case IP_EVENT_STA_GOT_IP: {
-        esp_blufi_extra_info_t info;
+        blufi_service_wifi_status_t status;
         esp_err_t ret = ESP_OK;
 
         xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
-        esp_wifi_get_mode(&mode);
-
-        memset(&info, 0, sizeof(esp_blufi_extra_info_t));
-        memcpy(info.sta_bssid, s_wifi_state.bssid, 6);
-        info.sta_bssid_set = true;
-        info.sta_ssid = s_wifi_state.ssid;
-        info.sta_ssid_len = s_wifi_state.ssid_len;
         s_wifi_state.got_ip = true;
         BLUFI_INFO("WiFi got IP\n");
         app_log_internal_heap("got_ip");
-        if (s_blufi_state.ble_connected == true) {
-            esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS, app_softap_get_current_connection_number(), &info);
-        } else {
-            BLUFI_INFO("BLUFI BLE is not connected yet\n");
-            app_schedule_runtime_transition();
-        }
+        app_build_blufi_wifi_status(&status);
+        blufi_service_on_wifi_got_ip(&status);
         ret = time_service_start_sntp();
         if (ret != ESP_OK) {
             BLUFI_ERROR("Failed to start SNTP: %s\n", esp_err_to_name(ret));
@@ -654,11 +512,10 @@ static void app_wifi_event_handler(void* arg, esp_event_base_t event_base,
 {
     wifi_event_sta_connected_t *event;
     wifi_event_sta_disconnected_t *disconnected_event;
-    wifi_mode_t mode;
 
     switch (event_id) {
     case WIFI_EVENT_STA_START:
-        if (!s_wifi_state.has_stored_config && !s_wifi_state.connect_requested) {
+        if (!s_wifi_state.has_stored_config && !blufi_service_has_connect_request()) {
             BLUFI_INFO("Waiting for BLUFI WiFi credentials before STA connect\n");
             break;
         }
@@ -691,9 +548,9 @@ static void app_wifi_event_handler(void* arg, esp_event_base_t event_base,
         if (s_wifi_state.connected == false && app_wifi_reconnect() == false) {
             s_wifi_state.connecting = false;
             app_record_wifi_conn_info(disconnected_event->rssi, disconnected_event->reason);
-            if (!s_blufi_state.active && !s_blufi_state.starting && !s_blufi_state.resources_released) {
+            if (blufi_service_can_start()) {
                 BLUFI_INFO("Stored WiFi connection failed; starting BLUFI for reprovisioning\n");
-                (void)app_start_blufi_services();
+                (void)blufi_service_start();
             }
         }
         /* This is a workaround as ESP32 WiFi libs don't currently
@@ -703,84 +560,33 @@ static void app_wifi_event_handler(void* arg, esp_event_base_t event_base,
         memset(s_wifi_state.ssid, 0, 32);
         memset(s_wifi_state.bssid, 0, 6);
         s_wifi_state.ssid_len = 0;
+        blufi_service_on_wifi_disconnected();
         xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
         break;
-    case WIFI_EVENT_AP_START:
-        esp_wifi_get_mode(&mode);
-
-        /* TODO: get config or information of softap, then set to report extra_info */
-        if (s_blufi_state.ble_connected == true) {
-            if (s_wifi_state.connected) {
-                esp_blufi_extra_info_t info;
-                memset(&info, 0, sizeof(esp_blufi_extra_info_t));
-                memcpy(info.sta_bssid, s_wifi_state.bssid, 6);
-                info.sta_bssid_set = true;
-                info.sta_ssid = s_wifi_state.ssid;
-                info.sta_ssid_len = s_wifi_state.ssid_len;
-                esp_blufi_send_wifi_conn_report(mode, s_wifi_state.got_ip ? ESP_BLUFI_STA_CONN_SUCCESS : ESP_BLUFI_STA_NO_IP, app_softap_get_current_connection_number(), &info);
-            } else if (s_wifi_state.connecting) {
-                esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONNECTING, app_softap_get_current_connection_number(), &s_wifi_state.conn_info);
-            } else {
-                esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_FAIL, app_softap_get_current_connection_number(), &s_wifi_state.conn_info);
-            }
-        } else {
-            BLUFI_INFO("BLUFI BLE is not connected yet\n");
-        }
+    case WIFI_EVENT_SCAN_DONE:
+        blufi_service_send_wifi_list_from_scan();
         break;
-    case WIFI_EVENT_SCAN_DONE: {
-        uint16_t apCount = 0;
-        esp_wifi_scan_get_ap_num(&apCount);
-        if (apCount == 0) {
-            BLUFI_INFO("Nothing AP found");
-            break;
-        }
-        wifi_ap_record_t *ap_list = (wifi_ap_record_t *)malloc(sizeof(wifi_ap_record_t) * apCount);
-        if (!ap_list) {
-            BLUFI_ERROR("malloc error, ap_list is NULL");
-            esp_wifi_clear_ap_list();
-            break;
-        }
-        ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&apCount, ap_list));
-        esp_blufi_ap_record_t * blufi_ap_list = (esp_blufi_ap_record_t *)malloc(apCount * sizeof(esp_blufi_ap_record_t));
-        if (!blufi_ap_list) {
-            if (ap_list) {
-                free(ap_list);
-            }
-            BLUFI_ERROR("malloc error, blufi_ap_list is NULL");
-            break;
-        }
-        for (int i = 0; i < apCount; ++i)
-        {
-            blufi_ap_list[i].rssi = ap_list[i].rssi;
-            memcpy(blufi_ap_list[i].ssid, ap_list[i].ssid, sizeof(ap_list[i].ssid));
-        }
-
-        if (s_blufi_state.ble_connected == true) {
-            esp_blufi_send_wifi_list(apCount, blufi_ap_list);
-        } else {
-            BLUFI_INFO("BLUFI BLE is not connected yet\n");
-        }
-
-        esp_wifi_scan_stop();
-        free(ap_list);
-        free(blufi_ap_list);
-        break;
-    }
-    case WIFI_EVENT_AP_STACONNECTED: {
-        wifi_event_ap_staconnected_t* event = (wifi_event_ap_staconnected_t*) event_data;
-        BLUFI_INFO("station "MACSTR" join, AID=%d", MAC2STR(event->mac), event->aid);
-        break;
-    }
-    case WIFI_EVENT_AP_STADISCONNECTED: {
-        wifi_event_ap_stadisconnected_t* event = (wifi_event_ap_stadisconnected_t*) event_data;
-        BLUFI_INFO("station "MACSTR" leave, AID=%d, reason=%d", MAC2STR(event->mac), event->aid, event->reason);
-        break;
-    }
 
     default:
         break;
     }
     return;
+}
+
+static esp_err_t app_clear_wifi_credentials_for_blufi_test(void)
+{
+    esp_err_t ret = ESP_OK;
+
+    /* Temporary BLUFI app test hook: remove after provisioning validation. */
+    BLUFI_INFO("Temporary BLUFI test: clearing stored WiFi config\n");
+    ret = esp_wifi_restore();
+    if (ret != ESP_OK) {
+        BLUFI_ERROR("Failed to clear stored WiFi config: %s\n", esp_err_to_name(ret));
+        return ret;
+    }
+
+    blufi_service_reset_wifi_config_cache();
+    return ESP_OK;
 }
 
 static void app_start_connectivity(void)
@@ -793,8 +599,6 @@ static void app_start_connectivity(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
     assert(sta_netif);
-    esp_netif_t *ap_netif = esp_netif_create_default_wifi_ap();
-    assert(ap_netif);
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &app_wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &app_ip_event_handler, NULL));
 
@@ -802,15 +606,16 @@ static void app_start_connectivity(void)
     app_log_internal_heap("before_esp_wifi_init");
     ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
     app_log_internal_heap("after_esp_wifi_init");
+    ESP_ERROR_CHECK( app_clear_wifi_credentials_for_blufi_test() );
     ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
     config_ret = esp_wifi_get_config(WIFI_IF_STA, &stored_sta_config);
     s_wifi_state.has_stored_config = (config_ret == ESP_OK) && (stored_sta_config.sta.ssid[0] != '\0');
     if (s_wifi_state.has_stored_config) {
-        sta_config = stored_sta_config;
+        blufi_service_set_sta_config(&stored_sta_config);
         BLUFI_INFO("Stored WiFi config found; skipping BLUFI startup\n");
     } else {
         BLUFI_INFO("No stored WiFi config; starting BLUFI provisioning\n");
-        (void)app_start_blufi_services();
+        (void)blufi_service_start();
     }
     app_record_wifi_conn_info(EXAMPLE_INVALID_RSSI, EXAMPLE_INVALID_REASON);
     app_log_internal_heap("before_esp_wifi_start");
@@ -874,273 +679,103 @@ static esp_err_t app_lifecycle_init_core_services(void)
     return ESP_OK;
 }
 
-static void app_blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_t *param)
+static bool app_blufi_get_wifi_status(void *ctx, blufi_service_wifi_status_t *out_status)
 {
-    /* BLUFI callbacks run the provisioning actions directly to preserve existing behavior. */
-    switch (event) {
-    case ESP_BLUFI_EVENT_INIT_FINISH:
-        BLUFI_INFO("BLUFI init finish\n");
-        s_blufi_state.starting = false;
-        s_blufi_state.active = true;
-        esp_blufi_adv_start();
-        break;
-    case ESP_BLUFI_EVENT_DEINIT_FINISH:
-        BLUFI_INFO("BLUFI deinit finish\n");
-        s_blufi_state.starting = false;
-        s_blufi_state.active = false;
-        s_blufi_state.resources_released = true;
-        break;
-    case ESP_BLUFI_EVENT_BLE_CONNECT:
-        BLUFI_INFO("BLUFI ble connect\n");
-        s_blufi_state.ble_connected = true;
-        esp_blufi_adv_stop();
-        blufi_security_init();
-        #ifdef CONFIG_EXAMPLE_BLUFI_BLE_SMP_ENABLE
-        // Try to initiate BLE security request after connection established.
-        BLUFI_INFO("Try to initiate BLE security request\n");
-        esp_err_t ret = esp_blufi_start_security_request(param->connect.remote_bda);
-        if (ret != ESP_OK) {
-            BLUFI_ERROR("Failed to start security request: %s\n", esp_err_to_name(ret));
-        }
-        #endif // CONFIG_EXAMPLE_BLUFI_BLE_SMP_ENABLE
-        break;
-    case ESP_BLUFI_EVENT_BLE_DISCONNECT:
-        BLUFI_INFO("BLUFI ble disconnect\n");
-        s_blufi_state.ble_connected = false;
-        blufi_security_deinit();
-        if (s_wifi_state.got_ip) {
-            app_schedule_runtime_transition();
-        } else {
-            esp_blufi_adv_start();
-        }
-        break;
-    case ESP_BLUFI_EVENT_SET_WIFI_OPMODE:
-        BLUFI_INFO("BLUFI Set WIFI opmode %d\n", param->wifi_mode.op_mode);
-        ESP_ERROR_CHECK( esp_wifi_set_mode(param->wifi_mode.op_mode) );
-        break;
-    case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP:
-        s_wifi_state.connect_requested = true;
-        BLUFI_INFO("BLUFI request wifi connect to AP (ssid_received=%d password_received=%d ssid_len=%d)\n",
-                   s_wifi_state.ssid_received ? 1 : 0,
-                   s_wifi_state.password_received ? 1 : 0,
-                   s_wifi_state.ssid_len);
-        app_log_internal_heap("req_connect_to_ap");
-        /* there is no wifi callback when the device has already connected to this wifi
-        so disconnect wifi before connection.
-        */
-        esp_wifi_disconnect();
-        app_wifi_connect();
-        break;
-    case ESP_BLUFI_EVENT_REQ_DISCONNECT_FROM_AP:
-        BLUFI_INFO("BLUFI request wifi disconnect from AP\n");
-        esp_wifi_disconnect();
-        break;
-    case ESP_BLUFI_EVENT_REPORT_ERROR:
-        BLUFI_ERROR("BLUFI report error, error code %d\n", param->report_error.state);
-        esp_blufi_send_error_info(param->report_error.state);
-        break;
-    case ESP_BLUFI_EVENT_GET_WIFI_STATUS: {
-        wifi_mode_t mode;
-        esp_blufi_extra_info_t info;
+    (void)ctx;
 
-        esp_wifi_get_mode(&mode);
-
-        if (s_wifi_state.connected) {
-            memset(&info, 0, sizeof(esp_blufi_extra_info_t));
-            memcpy(info.sta_bssid, s_wifi_state.bssid, 6);
-            info.sta_bssid_set = true;
-            info.sta_ssid = s_wifi_state.ssid;
-            info.sta_ssid_len = s_wifi_state.ssid_len;
-            esp_blufi_send_wifi_conn_report(mode, s_wifi_state.got_ip ? ESP_BLUFI_STA_CONN_SUCCESS : ESP_BLUFI_STA_NO_IP, app_softap_get_current_connection_number(), &info);
-        } else if (s_wifi_state.connecting) {
-            esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONNECTING, app_softap_get_current_connection_number(), &s_wifi_state.conn_info);
-        } else {
-            esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_FAIL, app_softap_get_current_connection_number(), &s_wifi_state.conn_info);
-        }
-        BLUFI_INFO("BLUFI get wifi status from AP (got_ip=%d connected=%d connecting=%d ssid_received=%d password_received=%d connect_requested=%d)\n",
-                   s_wifi_state.got_ip ? 1 : 0,
-                   s_wifi_state.connected ? 1 : 0,
-                   s_wifi_state.connecting ? 1 : 0,
-                   s_wifi_state.ssid_received ? 1 : 0,
-                   s_wifi_state.password_received ? 1 : 0,
-                   s_wifi_state.connect_requested ? 1 : 0);
-        app_log_internal_heap("get_wifi_status");
-
-        break;
+    if (out_status == NULL) {
+        return false;
     }
-    case ESP_BLUFI_EVENT_RECV_SLAVE_DISCONNECT_BLE:
-        BLUFI_INFO("blufi close a gatt connection");
-        esp_blufi_disconnect();
-        break;
-    case ESP_BLUFI_EVENT_DEAUTHENTICATE_STA:
-        /* TODO */
-        break;
-	case ESP_BLUFI_EVENT_RECV_STA_BSSID:
-        memcpy(sta_config.sta.bssid, param->sta_bssid.bssid, 6);
-        sta_config.sta.bssid_set = 1;
-        esp_err_t bssid_set_config_ret = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
-        BLUFI_INFO("Recv STA BSSID, set_config=%s\n", esp_err_to_name(bssid_set_config_ret));
-        break;
-	case ESP_BLUFI_EVENT_RECV_STA_SSID:
-        if (param->sta_ssid.ssid_len >= sizeof(sta_config.sta.ssid)/sizeof(sta_config.sta.ssid[0])) {
-            esp_blufi_send_error_info(ESP_BLUFI_DATA_FORMAT_ERROR);
-            BLUFI_INFO("Invalid STA SSID\n");
-            break;
-        }
-        strncpy((char *)sta_config.sta.ssid, (char *)param->sta_ssid.ssid, param->sta_ssid.ssid_len);
-        sta_config.sta.ssid[param->sta_ssid.ssid_len] = '\0';
-        s_wifi_state.ssid_received = true;
-        esp_err_t ssid_set_config_ret = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
-        BLUFI_INFO("Recv STA SSID len=%u value=%s set_config=%s\n",
-                   (unsigned int)param->sta_ssid.ssid_len,
-                   sta_config.sta.ssid,
-                   esp_err_to_name(ssid_set_config_ret));
-        app_log_internal_heap("recv_sta_ssid");
-        break;
-	case ESP_BLUFI_EVENT_RECV_STA_PASSWD:
-        if (param->sta_passwd.passwd_len >= sizeof(sta_config.sta.password)/sizeof(sta_config.sta.password[0])) {
-            esp_blufi_send_error_info(ESP_BLUFI_DATA_FORMAT_ERROR);
-            BLUFI_INFO("Invalid STA PASSWORD\n");
-            break;
-        }
-        strncpy((char *)sta_config.sta.password, (char *)param->sta_passwd.passwd, param->sta_passwd.passwd_len);
-        sta_config.sta.password[param->sta_passwd.passwd_len] = '\0';
-        sta_config.sta.threshold.authmode = EXAMPLE_WIFI_SCAN_AUTH_MODE_THRESHOLD;
-        s_wifi_state.password_received = true;
-        esp_err_t passwd_set_config_ret = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
-        BLUFI_INFO("Recv STA PASSWORD len=%u threshold_authmode=%d set_config=%s (hidden)\n",
-                   (unsigned int)param->sta_passwd.passwd_len,
-                   sta_config.sta.threshold.authmode,
-                   esp_err_to_name(passwd_set_config_ret));
-        app_log_internal_heap("recv_sta_password");
-        break;
-	case ESP_BLUFI_EVENT_RECV_SOFTAP_SSID:
-        if (param->softap_ssid.ssid_len >= sizeof(ap_config.ap.ssid)/sizeof(ap_config.ap.ssid[0])) {
-            esp_blufi_send_error_info(ESP_BLUFI_DATA_FORMAT_ERROR);
-            BLUFI_INFO("Invalid SOFTAP SSID\n");
-            break;
-        }
-        strncpy((char *)ap_config.ap.ssid, (char *)param->softap_ssid.ssid, param->softap_ssid.ssid_len);
-        ap_config.ap.ssid[param->softap_ssid.ssid_len] = '\0';
-        ap_config.ap.ssid_len = param->softap_ssid.ssid_len;
-        esp_wifi_set_config(WIFI_IF_AP, &ap_config);
-        BLUFI_INFO("Recv SOFTAP SSID %s, ssid len %d\n", ap_config.ap.ssid, ap_config.ap.ssid_len);
-        break;
-	case ESP_BLUFI_EVENT_RECV_SOFTAP_PASSWD:
-        if (param->softap_passwd.passwd_len >= sizeof(ap_config.ap.password)/sizeof(ap_config.ap.password[0])) {
-            esp_blufi_send_error_info(ESP_BLUFI_DATA_FORMAT_ERROR);
-            BLUFI_INFO("Invalid SOFTAP PASSWD\n");
-            break;
-        }
-        strncpy((char *)ap_config.ap.password, (char *)param->softap_passwd.passwd, param->softap_passwd.passwd_len);
-        ap_config.ap.password[param->softap_passwd.passwd_len] = '\0';
-        esp_wifi_set_config(WIFI_IF_AP, &ap_config);
-        BLUFI_INFO("Recv SOFTAP PASSWORD len = %d (hidden)\n", param->softap_passwd.passwd_len);
-        break;
-	case ESP_BLUFI_EVENT_RECV_SOFTAP_MAX_CONN_NUM:
-        if (param->softap_max_conn_num.max_conn_num > 4) {
-            return;
-        }
-        ap_config.ap.max_connection = param->softap_max_conn_num.max_conn_num;
-        esp_wifi_set_config(WIFI_IF_AP, &ap_config);
-        BLUFI_INFO("Recv SOFTAP MAX CONN NUM %d\n", ap_config.ap.max_connection);
-        break;
-	case ESP_BLUFI_EVENT_RECV_SOFTAP_AUTH_MODE:
-        if (param->softap_auth_mode.auth_mode >= WIFI_AUTH_MAX) {
-            return;
-        }
-        ap_config.ap.authmode = param->softap_auth_mode.auth_mode;
-        esp_wifi_set_config(WIFI_IF_AP, &ap_config);
-        BLUFI_INFO("Recv SOFTAP AUTH MODE %d\n", ap_config.ap.authmode);
-        break;
-	case ESP_BLUFI_EVENT_RECV_SOFTAP_CHANNEL:
-        if (param->softap_channel.channel > 13) {
-            return;
-        }
-        ap_config.ap.channel = param->softap_channel.channel;
-        esp_wifi_set_config(WIFI_IF_AP, &ap_config);
-        BLUFI_INFO("Recv SOFTAP CHANNEL %d\n", ap_config.ap.channel);
-        break;
-    case ESP_BLUFI_EVENT_GET_WIFI_LIST:{
-        wifi_scan_config_t scanConf = {
-            .ssid = NULL,
-            .bssid = NULL,
-            .channel = 0,
-            .show_hidden = false
-        };
-        esp_err_t ret = esp_wifi_scan_start(&scanConf, true);
-        if (ret != ESP_OK) {
-            esp_blufi_send_error_info(ESP_BLUFI_WIFI_SCAN_FAIL);
-        }
-        break;
-    }
-    case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA:
-        BLUFI_INFO("Recv Custom Data %" PRIu32 "\n", param->custom_data.data_len);
-#if CONFIG_APP_LOG_SENSITIVE_DATA
-        ESP_LOG_BUFFER_HEX("Custom Data", param->custom_data.data, param->custom_data.data_len);
-#else
-        BLUFI_INFO("Custom data payload hidden\n");
-#endif
-        if ((param->custom_data.data != NULL) && (param->custom_data.data_len > 0)) {
-            char *payload = calloc(1, param->custom_data.data_len + 1);
-            if (payload == NULL) {
-                BLUFI_ERROR("Failed to allocate custom data payload buffer\n");
-                break;
-            }
-            memcpy(payload, param->custom_data.data, param->custom_data.data_len);
-            payload[param->custom_data.data_len] = '\0';
 
-            bool changed = false;
-            esp_err_t custom_data_ret = device_cloud_service_update_from_json(payload,
-                                                                              param->custom_data.data_len,
-                                                                              &changed);
-            if (custom_data_ret != ESP_OK) {
-                BLUFI_ERROR("Failed to apply cloud config from custom data: %s\n",
-                            esp_err_to_name(custom_data_ret));
-            } else if (changed) {
-                BLUFI_INFO("Cloud config updated from BLUFI custom data\n");
-                if (!s_runtime_state.startup_pull_done && s_runtime_state.network_started) {
-                    s_runtime_state.startup_pull_requested = true;
-                    network_task_service_request_playback_pull(NETWORK_TASK_PLAYBACK_REASON_STARTUP);
-                } else if (!s_runtime_state.startup_weather_done && s_runtime_state.network_started) {
-                    s_runtime_state.startup_weather_requested = true;
-                    network_task_service_request_weather_refresh(NETWORK_TASK_WEATHER_REASON_STARTUP);
-                } else {
-                    weather_service_request_refresh();
-                    playback_task_service_request_sync();
-                }
-            }
-            free(payload);
-        }
-        break;
-	case ESP_BLUFI_EVENT_RECV_USERNAME:
-        /* Not handle currently */
-        break;
-	case ESP_BLUFI_EVENT_RECV_CA_CERT:
-        /* Not handle currently */
-        break;
-	case ESP_BLUFI_EVENT_RECV_CLIENT_CERT:
-        /* Not handle currently */
-        break;
-	case ESP_BLUFI_EVENT_RECV_SERVER_CERT:
-        /* Not handle currently */
-        break;
-	case ESP_BLUFI_EVENT_RECV_CLIENT_PRIV_KEY:
-        /* Not handle currently */
-        break;;
-	case ESP_BLUFI_EVENT_RECV_SERVER_PRIV_KEY:
-        /* Not handle currently */
-        break;
-    default:
-        break;
+    app_build_blufi_wifi_status(out_status);
+    return true;
+}
+
+static void app_blufi_schedule_runtime_transition(void *ctx)
+{
+    (void)ctx;
+    app_schedule_runtime_transition();
+}
+
+static void app_blufi_request_wifi_connect(void *ctx)
+{
+    (void)ctx;
+    app_wifi_connect();
+}
+
+static void app_blufi_request_wifi_disconnect(void *ctx)
+{
+    (void)ctx;
+    esp_wifi_disconnect();
+}
+
+static void app_blufi_request_startup_playback_pull(void *ctx)
+{
+    (void)ctx;
+
+    if (!s_runtime_state.startup_pull_done && s_runtime_state.network_started) {
+        s_runtime_state.startup_pull_requested = true;
+        network_task_service_request_playback_pull(NETWORK_TASK_PLAYBACK_REASON_STARTUP);
+    }
+}
+
+static void app_blufi_request_startup_weather_refresh(void *ctx)
+{
+    (void)ctx;
+
+    if (!s_runtime_state.startup_weather_done && s_runtime_state.network_started) {
+        s_runtime_state.startup_weather_requested = true;
+        network_task_service_request_weather_refresh(NETWORK_TASK_WEATHER_REASON_STARTUP);
+    }
+}
+
+static void app_blufi_request_weather_refresh(void *ctx)
+{
+    (void)ctx;
+    weather_service_request_refresh();
+}
+
+static void app_blufi_request_playback_sync(void *ctx)
+{
+    (void)ctx;
+    playback_task_service_request_sync();
+}
+
+static void app_blufi_cloud_config_changed(void *ctx)
+{
+    (void)ctx;
+
+    if (!s_runtime_state.startup_pull_done && s_runtime_state.network_started) {
+        app_blufi_request_startup_playback_pull(NULL);
+    } else if (!s_runtime_state.startup_weather_done && s_runtime_state.network_started) {
+        app_blufi_request_startup_weather_refresh(NULL);
+    } else {
+        app_blufi_request_weather_refresh(NULL);
+        app_blufi_request_playback_sync(NULL);
     }
 }
 
 esp_err_t app_lifecycle_boot(void)
 {
     esp_err_t ret = ESP_OK;
+    const blufi_service_runtime_hooks_t blufi_hooks = {
+        .get_wifi_status = app_blufi_get_wifi_status,
+        .schedule_runtime_transition = app_blufi_schedule_runtime_transition,
+        .request_wifi_connect = app_blufi_request_wifi_connect,
+        .request_wifi_disconnect = app_blufi_request_wifi_disconnect,
+        .request_startup_playback_pull = app_blufi_request_startup_playback_pull,
+        .request_startup_weather_refresh = app_blufi_request_startup_weather_refresh,
+        .request_weather_refresh = app_blufi_request_weather_refresh,
+        .request_playback_sync = app_blufi_request_playback_sync,
+        .cloud_config_changed = app_blufi_cloud_config_changed,
+    };
 
     ret = app_lifecycle_init_core_services();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = blufi_service_init(&blufi_hooks, NULL);
     if (ret != ESP_OK) {
         return ret;
     }
