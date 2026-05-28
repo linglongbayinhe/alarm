@@ -1,0 +1,10 @@
+#ifndef DEVICE_INFO_H
+#define DEVICE_INFO_H
+
+#define DEVICE_ID_SIZE 64
+#define CLIENT_ID_SIZE 64
+#define DEVICE_CITY_SIZE 64
+
+#define DEVICE_INFO_DEFAULT_CLIENT_ID "client_1776770443964_jmxlxc"
+
+#endif

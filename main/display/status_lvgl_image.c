@@ -24,6 +24,7 @@ static uint16_t s_pixels[STATUS_LVGL_ICON_PIXELS];
 static lv_image_dsc_t s_img_dsc;
 static bool s_inited;
 static bool s_cached_valid;
+static lv_obj_t *s_cached_img;
 static display_wifi_status_icon_t s_cached_icon;
 
 static void status_lvgl_image_init_dsc(void)
@@ -256,15 +257,16 @@ void status_lvgl_image_update(lv_obj_t *img, const display_wifi_status_icon_t *i
     }
 
     if (!icon->visible || (icon->kind == DISPLAY_STATUS_ICON_KIND_NONE)) {
-        if (!s_cached_valid || s_cached_icon.visible) {
+        if (!s_cached_valid || (s_cached_img != img) || s_cached_icon.visible) {
             lv_obj_add_flag(img, LV_OBJ_FLAG_HIDDEN);
             s_cached_icon = *icon;
+            s_cached_img = img;
             s_cached_valid = true;
         }
         return;
     }
 
-    if (s_cached_valid && status_lvgl_icon_equals(&s_cached_icon, icon)) {
+    if (s_cached_valid && (s_cached_img == img) && status_lvgl_icon_equals(&s_cached_icon, icon)) {
         return;
     }
 
@@ -279,5 +281,6 @@ void status_lvgl_image_update(lv_obj_t *img, const display_wifi_status_icon_t *i
     lv_obj_invalidate(img);
 
     s_cached_icon = *icon;
+    s_cached_img = img;
     s_cached_valid = true;
 }

@@ -1,0 +1,6 @@
+# UI Chinese symbols used by the LVGL 16px Source Han Sans font.
+# Keep ASCII through --range 32-127 in generate_ui_font.ps1; only put non-ASCII symbols here.
+年月日周星期一二三四五六时分
+晴阴多云小中大雨阵雪风雾霾沙尘暴雷温度℃°
+扫码配网请用程序连接中成功失败重新输入信息
+，

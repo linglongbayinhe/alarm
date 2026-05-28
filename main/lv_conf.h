@@ -239,7 +239,7 @@
 #define LV_USE_TJPGD     0
 #define LV_USE_LIBJPEG_TURBO 0
 #define LV_USE_GIF       0
-#define LV_USE_QRCODE    0
+#define LV_USE_QRCODE    1
 #define LV_USE_BARCODE   0
 #define LV_USE_FREETYPE  0
 #define LV_USE_TINY_TTF  0

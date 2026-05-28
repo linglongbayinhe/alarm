@@ -1,0 +1,128 @@
+文件：network_task_service.h (line 1)
+公共类型定义：
+类型	定义/参数	作用
+network_task_json_result_cb_t	(esp_err_t ret, const char *json, size_t json_len, void *ctx)	播放任务/天气接口返回 JSON 后的回调
+network_task_audio_cache_result_cb_t	(request_url, canonical_url, audio_id, ret, local_path, ctx)	单个音频缓存任务完成回调
+network_task_audio_cache_done_cb_t	(esp_err_t ret, void *ctx)	整批音频缓存维护结束回调
+network_task_startup_pull_done_cb_t	(esp_err_t ret, void *ctx)	开机播放任务拉取完成回调
+network_task_startup_weather_done_cb_t	(esp_err_t ret, void *ctx)	开机天气刷新完成回调
+network_task_playback_reason_t	NONE / NORMAL / STARTUP / POST_PLAYBACK	区分拉播放任务的原因和优先级
+network_task_weather_reason_t	NONE / NORMAL / STARTUP	区分天气刷新原因
+network_task_audio_cache_item_t	download_url[AUDIO_CACHE_URL_SIZE], ring_at_epoch	对外传入的音频缓存维护条目
+公共方法：
+方法	参数	作用
+network_task_service_init	void	创建互斥锁，标记服务初始化
+network_task_service_start	EventGroupHandle_t connected_event_group, EventBits_t connected_bit	启动后台网络任务，等待 Wi-Fi connected bit 后处理任务
+network_task_service_register_playback_pull_handler	handler, ctx	注册播放任务拉取结果回调
+network_task_service_register_weather_handler	handler, ctx	注册天气刷新结果回调
+network_task_service_register_audio_cache_handler	handler, ctx	注册单个音频缓存结果回调
+network_task_service_register_audio_cache_done_handler	handler, ctx	注册音频缓存批处理完成回调
+network_task_service_register_startup_pull_done_handler	handler, ctx	注册开机播放拉取完成回调
+network_task_service_register_startup_weather_done_handler	handler, ctx	注册开机天气刷新完成回调
+network_task_service_request_playback_pull	network_task_playback_reason_t reason	投递“拉取播放任务”请求
+network_task_service_request_weather_refresh	network_task_weather_reason_t reason	投递“刷新天气”请求
+network_task_service_request_audio_cache_maintenance	items, item_count, protected_path	投递音频缓存维护请求，去重并限制数量
+network_task_service_request_playback_report	instance_id, status, audio_status	投递播放状态上报请求
+network_task_service_reset_sessions	void	通知后台任务重建 HTTP session
+network_task_service_set_https_suspended	bool suspended	暂停/恢复 HTTPS 网络任务，播放本地音频时使用
+network_task_service_wait_idle	uint32_t timeout_ms	等待当前活跃网络任务结束
+network_task_service.c
+文件：network_task_service.c (line 1)
+内部定义：
+定义	作用
+NETWORK_TASK_STACK_SIZE	后台任务栈大小，12288
+NETWORK_TASK_PRIORITY	后台任务优先级，4
+NETWORK_TASK_RESPONSE_BYTES	HTTP 响应缓冲区大小，4096
+NETWORK_TASK_REPORT_BYTES	上报 JSON 请求体缓冲区，512
+NETWORK_TASK_MAX_REPORT_JOBS	状态上报队列最大数量，8
+NETWORK_TASK_MAX_AUDIO_JOBS	音频缓存队列最大数量，12
+NETWORK_TASK_HTTPS_HEAP_FREE_MIN / LARGEST_MIN	HTTPS 执行前堆内存门槛
+network_task_job_type_t	内部任务类型：上报、拉任务、天气、音频维护等
+network_report_job_t	内部播放状态上报任务结构
+network_task_job_t	内部统一任务结构，含 union 数据
+静态全局变量都是 .c 内部状态，包括锁、任务句柄、pending reason、音频缓存队列、上报队列、回调函数、HTTPS 暂停状态、当前活跃任务状态等。它们都不应该直接公开。
+静态方法：
+方法	参数	作用
+network_task_copy_string	destination, destination_size, source	安全字符串复制，NULL 转空串
+network_task_log_heap	stage	打印当前 heap 状态
+network_task_notify	void	给后台任务发 NETWORK_TASK_NOTIFY_WORK
+network_task_lock / network_task_unlock	void	封装互斥锁
+network_task_https_suspended	void	线程安全读取 HTTPS 暂停状态
+network_task_set_active_job	network_task_job_type_t type	设置当前活跃任务类型和 busy 标记
+network_task_https_heap_ready	job_name	检查 HTTPS 执行前内存是否足够
+network_task_playback_job_name	reason	把播放任务 reason 转日志名
+network_task_weather_job_name	reason	把天气 reason 转日志名
+network_task_audio_url_queued_locked	download_url	在已加锁状态下检查音频 URL 是否已入队
+network_task_take_next_job	network_task_job_t *job	从内部队列按优先级取下一个任务
+network_task_has_pending_work	void	判断是否还有待处理任务
+network_task_reset_session	session, response_buffer, response_buffer_size	deinit/init HTTP session
+network_task_clear_response	response	清空 HTTP response 状态和缓冲区
+network_task_execute_playback_pull	session, response, request_body, request_body_size, reason	执行云端 pullPlaybackTasks POST，并触发结果回调
+network_task_execute_weather_refresh	同上，最后参数是 weather reason	执行云端 getCurrentWeather POST，并触发结果回调
+network_task_audio_cache_result_bridge	音频缓存结果参数 + ctx	把 audio_cache_service 回调桥接到本服务注册的回调
+network_task_execute_audio_maintenance	void	复制待缓存列表，调用 audio_cache_service_maintain
+network_task_execute_report	session, response, request_body, request_body_size, job	拼接播放状态 JSON 并 POST 到上报接口
+network_task_worker	void *arg	FreeRTOS 后台任务主循环
+公开方法就是 header 中那 15 个 network_task_service_*，它们不是 static。
+device_cloud_service.h
+文件：device_cloud_service.h (line 1)
+公共宏：
+宏	值	作用
+DEVICE_CLOUD_URL_SIZE	256	URL 字段长度
+DEVICE_CLOUD_ID_SIZE	64	client/device id 长度
+DEVICE_CLOUD_HEADER_NAME_SIZE	64	鉴权 header 名长度
+DEVICE_CLOUD_HEADER_VALUE_SIZE	160	鉴权 header 值长度
+公共结构体：
+类型	字段	作用
+device_cloud_config_t	display_state_url, pull_tasks_url, report_status_url, client_id, device_id, auth_header_name, auth_header_value, preload_window_hours, display_poll_seconds, task_poll_seconds	云端配置快照
+device_cloud_http_response_t	buffer, buffer_size, length, status_code, truncated	HTTP 响应承载结构
+device_cloud_session_t	client, active_response, response_buffer, url, auth header, config_generation, last_status_code, last_error	可复用 HTTP session 状态
+公共方法：
+方法	参数	作用
+device_cloud_service_init	void	初始化默认配置，读取/修复 NVS 配置
+device_cloud_service_get_device_id	char *buffer, size_t buffer_size	读取蓝牙 MAC 并格式化为 device id
+device_cloud_service_get_config	device_cloud_config_t *out_config	获取当前云端配置快照
+device_cloud_service_update_from_json	json, json_len, bool *changed	从 BLUFI/custom JSON 更新云端配置并持久化
+device_cloud_service_get_generation	void	获取配置版本号，用于检测配置变化
+device_cloud_service_build_device_request_json	buffer, buffer_size	构造 {"clientId": "...", "deviceId": "..."}
+device_cloud_session_init	session, response_buffer, response_buffer_size	初始化可复用 HTTP session
+device_cloud_session_deinit	session	清理 HTTP client 和 session 状态
+device_cloud_session_post_json	session, url, json_body, response	使用可复用 session POST JSON
+device_cloud_service_post_json	url, json_body, response	一次性 POST JSON，内部创建并销毁 session
+device_cloud_service.c
+文件：device_cloud_service.c (line 1)
+内部定义：
+定义	作用
+DEVICE_CLOUD_NAMESPACE	NVS namespace：dev_cloud
+DEVICE_CLOUD_CONFIG_KEY	NVS key：config_v1
+DEVICE_CLOUD_DEFAULT_WEATHER_URL	默认天气接口
+DEVICE_CLOUD_DEFAULT_PULL_URL	默认播放任务拉取接口
+DEVICE_CLOUD_DEFAULT_REPORT_URL	默认播放状态上报接口
+DEVICE_CLOUD_DEFAULT_CLIENT_ID	默认 client id
+DEVICE_CLOUD_DEFAULT_PRELOAD_HOURS	默认预加载窗口，48 小时
+DEVICE_CLOUD_DEFAULT_DISPLAY_POLL_SECONDS	默认天气轮询，15 * 60 秒
+DEVICE_CLOUD_DEFAULT_TASK_POLL_SECONDS	默认播放任务轮询，60 秒
+DEVICE_CLOUD_HTTP_TIMEOUT_MS	HTTP 超时，10000 ms
+静态全局变量：
+变量	作用
+s_config_lock	配置读写临界区锁
+s_config	当前云端配置
+s_initialized	初始化标记
+s_generation	配置版本号
+静态方法：
+方法	参数	作用
+device_cloud_copy_string	destination, destination_size, source	安全字符串复制
+device_cloud_string_is_empty	value	判断字符串是否为空
+device_cloud_strings_equal	left, right	判断两个非 NULL 字符串是否相等
+device_cloud_config_has_persisted_urls	config	判断 NVS 中是否持久化过 URL
+device_cloud_init_defaults	config	写入默认云端配置
+device_cloud_derive_url	display_url, endpoint_name, destination, destination_size	根据 display URL 派生同路径下其他 endpoint URL
+device_cloud_apply_defaults	config	补齐缺省字段、修正轮询时间、重设 URL 为默认值
+device_cloud_save_config	config	保存配置到 NVS，当前实现不保存 URL
+device_cloud_store_config	config	写入全局配置并递增 generation
+device_cloud_try_set_string	root, primary_key, secondary_key, destination, destination_size	从 JSON 按蛇形/驼峰 key 读取字符串
+device_cloud_try_set_u32	root, primary_key, secondary_key, uint32_t *destination	从 JSON 读取无符号整数
+device_cloud_http_event_handler	esp_http_client_event_t *event	HTTP 数据事件回调，把响应数据追加到 buffer
+device_cloud_session_reset_client	session	清理 esp_http_client 并清空 session 绑定信息
+device_cloud_session_needs_rebuild	session, url, config_snapshot, generation	判断 HTTP client 是否需要重建
+device_cloud_session_prepare_client	session, url, config_snapshot, generation	创建或复用 HTTP client，配置 TLS、keep-alive、回调

@@ -7,6 +7,7 @@
 
 #include "audio_cache_service.h"
 #include "device_cloud_service.h"
+#include "device_utils.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/semphr.h"
@@ -79,15 +80,6 @@ static void *s_startup_weather_done_handler_ctx;
 static bool s_https_suspended;
 static bool s_active_job_busy;
 static network_task_job_type_t s_active_job_type;
-
-static void network_task_copy_string(char *destination, size_t destination_size, const char *source)
-{
-    if ((destination == NULL) || (destination_size == 0)) {
-        return;
-    }
-
-    snprintf(destination, destination_size, "%s", source == NULL ? "" : source);
-}
 
 static void network_task_log_heap(const char *stage)
 {
@@ -274,19 +266,6 @@ static void network_task_reset_session(device_cloud_session_t *session,
     device_cloud_session_init(session, response_buffer, response_buffer_size);
 }
 
-static void network_task_clear_response(device_cloud_http_response_t *response)
-{
-    if (response == NULL) {
-        return;
-    }
-    response->length = 0;
-    response->status_code = 0;
-    response->truncated = false;
-    if ((response->buffer != NULL) && (response->buffer_size > 0)) {
-        response->buffer[0] = '\0';
-    }
-}
-
 static void network_task_execute_playback_pull(device_cloud_session_t *session,
                                                device_cloud_http_response_t *response,
                                                char *request_body,
@@ -297,7 +276,7 @@ static void network_task_execute_playback_pull(device_cloud_session_t *session,
     esp_err_t ret = ESP_OK;
     const char *job_name = network_task_playback_job_name(reason);
 
-    network_task_clear_response(response);
+    device_cloud_http_response_clear(response);
 
     if (!network_task_https_heap_ready(job_name)) {
         ret = ESP_ERR_NO_MEM;
@@ -346,7 +325,7 @@ static void network_task_execute_weather_refresh(device_cloud_session_t *session
     esp_err_t ret = ESP_OK;
     const char *job_name = network_task_weather_job_name(reason);
 
-    network_task_clear_response(response);
+    device_cloud_http_response_clear(response);
     if (!network_task_https_heap_ready(job_name)) {
         ret = ESP_ERR_NO_MEM;
     }
@@ -427,7 +406,7 @@ static void network_task_execute_audio_maintenance(void)
     if (item_count > 0U) {
         memcpy(items, s_audio_cache_items, item_count * sizeof(*items));
     }
-    network_task_copy_string(protected_path, sizeof(protected_path), s_audio_cache_protected_path);
+    device_utils_copy_safe_string(protected_path, sizeof(protected_path), s_audio_cache_protected_path);
     s_audio_cache_item_count = 0;
     memset(s_audio_cache_items, 0, sizeof(s_audio_cache_items));
     s_audio_cache_protected_path[0] = '\0';
@@ -472,7 +451,7 @@ static void network_task_execute_report(device_cloud_session_t *session,
         return;
     }
 
-    network_task_clear_response(response);
+    device_cloud_http_response_clear(response);
     if (!network_task_https_heap_ready("playback_report")) {
         ret = ESP_ERR_NO_MEM;
     }
@@ -759,9 +738,9 @@ void network_task_service_request_audio_cache_maintenance(const network_task_aud
     network_task_lock();
     memset(s_audio_cache_items, 0, sizeof(s_audio_cache_items));
     s_audio_cache_item_count = 0;
-    network_task_copy_string(s_audio_cache_protected_path,
-                             sizeof(s_audio_cache_protected_path),
-                             protected_path);
+    device_utils_copy_safe_string(s_audio_cache_protected_path,
+                                  sizeof(s_audio_cache_protected_path),
+                                  protected_path);
 
     for (index = 0; index < item_count; ++index) {
         if (items[index].download_url[0] == '\0') {
@@ -774,9 +753,9 @@ void network_task_service_request_audio_cache_maintenance(const network_task_aud
             ++dropped_count;
             continue;
         }
-        network_task_copy_string(s_audio_cache_items[s_audio_cache_item_count].download_url,
-                                 sizeof(s_audio_cache_items[s_audio_cache_item_count].download_url),
-                                 items[index].download_url);
+        device_utils_copy_safe_string(s_audio_cache_items[s_audio_cache_item_count].download_url,
+                                      sizeof(s_audio_cache_items[s_audio_cache_item_count].download_url),
+                                      items[index].download_url);
         s_audio_cache_items[s_audio_cache_item_count].ring_at_epoch = items[index].ring_at_epoch;
         ++s_audio_cache_item_count;
         ++queued_count;
@@ -817,9 +796,9 @@ void network_task_service_request_playback_report(const char *instance_id,
         if (s_report_jobs[index].in_use &&
             (strcmp(s_report_jobs[index].instance_id, instance_id) == 0) &&
             (strcmp(s_report_jobs[index].status, status) == 0)) {
-            network_task_copy_string(s_report_jobs[index].audio_status,
-                                     sizeof(s_report_jobs[index].audio_status),
-                                     audio_status);
+            device_utils_copy_safe_string(s_report_jobs[index].audio_status,
+                                          sizeof(s_report_jobs[index].audio_status),
+                                          audio_status);
             network_task_unlock();
             ESP_LOGI(TAG, "Replaced playback_report for %s status=%s", instance_id, status);
             network_task_notify();
@@ -831,15 +810,15 @@ void network_task_service_request_playback_report(const char *instance_id,
     }
     if (free_index < NETWORK_TASK_MAX_REPORT_JOBS) {
         s_report_jobs[free_index].in_use = true;
-        network_task_copy_string(s_report_jobs[free_index].instance_id,
-                                 sizeof(s_report_jobs[free_index].instance_id),
-                                 instance_id);
-        network_task_copy_string(s_report_jobs[free_index].status,
-                                 sizeof(s_report_jobs[free_index].status),
-                                 status);
-        network_task_copy_string(s_report_jobs[free_index].audio_status,
-                                 sizeof(s_report_jobs[free_index].audio_status),
-                                 audio_status);
+        device_utils_copy_safe_string(s_report_jobs[free_index].instance_id,
+                                      sizeof(s_report_jobs[free_index].instance_id),
+                                      instance_id);
+        device_utils_copy_safe_string(s_report_jobs[free_index].status,
+                                      sizeof(s_report_jobs[free_index].status),
+                                      status);
+        device_utils_copy_safe_string(s_report_jobs[free_index].audio_status,
+                                      sizeof(s_report_jobs[free_index].audio_status),
+                                      audio_status);
     }
     network_task_unlock();
 

@@ -383,6 +383,7 @@ void blufi_dh_negotiate_data_handler(uint8_t *data, int len, uint8_t **output_da
         *output_data = &blufi_sec->self_public_key[0];
         *output_len = public_key_len;
         *need_free = false;
+        blufi_service_on_negotiate_success();
 
     }
         break;

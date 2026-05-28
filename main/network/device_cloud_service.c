@@ -1,47 +1,36 @@
 #include "device_cloud_service.h"
 
-#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "cJSON.h"
+#include "device_utils.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "nvs.h"
+#include "storage_keys.h"
 
 #if !defined(CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY) || !CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY
 #include "esp_crt_bundle.h"
 #endif
 
 static const char *TAG = "DEVICE_CLOUD";
-static const char *DEVICE_CLOUD_NAMESPACE = "dev_cloud";
-static const char *DEVICE_CLOUD_CONFIG_KEY = "config_v1";
 
 #define DEVICE_CLOUD_DEFAULT_WEATHER_URL "https://alarm.yoyospace.cc/device-service/getCurrentWeather"
 #define DEVICE_CLOUD_DEFAULT_PULL_URL    "https://alarm.yoyospace.cc/device-service/pullPlaybackTasks"
 #define DEVICE_CLOUD_DEFAULT_REPORT_URL  "https://alarm.yoyospace.cc/device-service/reportPlaybackTaskStatus"
-#define DEVICE_CLOUD_DEFAULT_CLIENT_ID   "client_1776770443964_jmxlxc"
-#define DEVICE_CLOUD_DEFAULT_DEVICE_ID   "dev_demo_001"
 #define DEVICE_CLOUD_DEFAULT_PRELOAD_HOURS 48
 #define DEVICE_CLOUD_DEFAULT_DISPLAY_POLL_SECONDS (15U * 60U)
 #define DEVICE_CLOUD_DEFAULT_TASK_POLL_SECONDS (60U)
 #define DEVICE_CLOUD_HTTP_TIMEOUT_MS 10000
+#define DEVICE_CLOUD_CONFIG_LEGACY_SIZE (sizeof(device_cloud_config_t) - DEVICE_CITY_SIZE)
 
-static portMUX_TYPE s_config_lock = portMUX_INITIALIZER_UNLOCKED;
-static device_cloud_config_t s_config;
-static bool s_initialized;
-static uint32_t s_generation;
-
-static void device_cloud_copy_string(char *destination, size_t destination_size, const char *source)
-{
-    if ((destination == NULL) || (destination_size == 0)) {
-        return;
-    }
-
-    snprintf(destination, destination_size, "%s", source == NULL ? "" : source);
-}
+static portMUX_TYPE s_cloud_config_lock = portMUX_INITIALIZER_UNLOCKED;
+static device_cloud_config_t s_cloud_config;
+static bool s_initialized_flag;
+static uint32_t s_config_version;
 
 static bool device_cloud_string_is_empty(const char *value)
 {
@@ -70,18 +59,22 @@ static bool device_cloud_config_has_persisted_urls(const device_cloud_config_t *
 
 static void device_cloud_init_defaults(device_cloud_config_t *config)
 {
+    char device_id[DEVICE_ID_SIZE] = {0};
+
     memset(config, 0, sizeof(*config));
-    device_cloud_copy_string(config->display_state_url,
-                             sizeof(config->display_state_url),
-                             DEVICE_CLOUD_DEFAULT_WEATHER_URL);
-    device_cloud_copy_string(config->pull_tasks_url,
-                             sizeof(config->pull_tasks_url),
-                             DEVICE_CLOUD_DEFAULT_PULL_URL);
-    device_cloud_copy_string(config->report_status_url,
-                             sizeof(config->report_status_url),
-                             DEVICE_CLOUD_DEFAULT_REPORT_URL);
-    device_cloud_copy_string(config->client_id, sizeof(config->client_id), DEVICE_CLOUD_DEFAULT_CLIENT_ID);
-    device_cloud_copy_string(config->device_id, sizeof(config->device_id), DEVICE_CLOUD_DEFAULT_DEVICE_ID);
+    device_utils_copy_safe_string(config->display_state_url,
+                                  sizeof(config->display_state_url),
+                                  DEVICE_CLOUD_DEFAULT_WEATHER_URL);
+    device_utils_copy_safe_string(config->pull_tasks_url,
+                                  sizeof(config->pull_tasks_url),
+                                  DEVICE_CLOUD_DEFAULT_PULL_URL);
+    device_utils_copy_safe_string(config->report_status_url,
+                                  sizeof(config->report_status_url),
+                                  DEVICE_CLOUD_DEFAULT_REPORT_URL);
+    device_utils_copy_safe_string(config->client_id, sizeof(config->client_id), DEVICE_INFO_DEFAULT_CLIENT_ID);
+    if (device_utils_get_device_id(device_id, sizeof(device_id)) == ESP_OK) {
+        device_utils_copy_safe_string(config->device_id, sizeof(config->device_id), device_id);
+    }
     config->preload_window_hours = DEVICE_CLOUD_DEFAULT_PRELOAD_HOURS;
     config->display_poll_seconds = DEVICE_CLOUD_DEFAULT_DISPLAY_POLL_SECONDS;
     config->task_poll_seconds = DEVICE_CLOUD_DEFAULT_TASK_POLL_SECONDS;
@@ -118,14 +111,16 @@ static void device_cloud_derive_url(const char *display_url,
 
 static void device_cloud_apply_defaults(device_cloud_config_t *config)
 {
+    char device_id[DEVICE_ID_SIZE] = {0};
+
     if (config == NULL) {
         return;
     }
 
     if (device_cloud_string_is_empty(config->display_state_url)) {
-        device_cloud_copy_string(config->display_state_url,
-                                 sizeof(config->display_state_url),
-                                 DEVICE_CLOUD_DEFAULT_WEATHER_URL);
+        device_utils_copy_safe_string(config->display_state_url,
+                                      sizeof(config->display_state_url),
+                                      DEVICE_CLOUD_DEFAULT_WEATHER_URL);
     }
     if (device_cloud_string_is_empty(config->pull_tasks_url)) {
         device_cloud_derive_url(config->display_state_url,
@@ -140,20 +135,20 @@ static void device_cloud_apply_defaults(device_cloud_config_t *config)
                                 sizeof(config->report_status_url));
     }
     if (device_cloud_string_is_empty(config->pull_tasks_url)) {
-        device_cloud_copy_string(config->pull_tasks_url,
-                                 sizeof(config->pull_tasks_url),
-                                 DEVICE_CLOUD_DEFAULT_PULL_URL);
+        device_utils_copy_safe_string(config->pull_tasks_url,
+                                      sizeof(config->pull_tasks_url),
+                                      DEVICE_CLOUD_DEFAULT_PULL_URL);
     }
     if (device_cloud_string_is_empty(config->report_status_url)) {
-        device_cloud_copy_string(config->report_status_url,
-                                 sizeof(config->report_status_url),
-                                 DEVICE_CLOUD_DEFAULT_REPORT_URL);
+        device_utils_copy_safe_string(config->report_status_url,
+                                      sizeof(config->report_status_url),
+                                      DEVICE_CLOUD_DEFAULT_REPORT_URL);
     }
     if (device_cloud_string_is_empty(config->client_id)) {
-        device_cloud_copy_string(config->client_id, sizeof(config->client_id), DEVICE_CLOUD_DEFAULT_CLIENT_ID);
+        device_utils_copy_safe_string(config->client_id, sizeof(config->client_id), DEVICE_INFO_DEFAULT_CLIENT_ID);
     }
-    if (device_cloud_string_is_empty(config->device_id)) {
-        device_cloud_copy_string(config->device_id, sizeof(config->device_id), DEVICE_CLOUD_DEFAULT_DEVICE_ID);
+    if (device_utils_get_device_id(device_id, sizeof(device_id)) == ESP_OK) {
+        device_utils_copy_safe_string(config->device_id, sizeof(config->device_id), device_id);
     }
     if (config->preload_window_hours == 0) {
         config->preload_window_hours = DEVICE_CLOUD_DEFAULT_PRELOAD_HOURS;
@@ -165,15 +160,15 @@ static void device_cloud_apply_defaults(device_cloud_config_t *config)
         config->task_poll_seconds = DEVICE_CLOUD_DEFAULT_TASK_POLL_SECONDS;
     }
 
-    device_cloud_copy_string(config->display_state_url,
-                             sizeof(config->display_state_url),
-                             DEVICE_CLOUD_DEFAULT_WEATHER_URL);
-    device_cloud_copy_string(config->pull_tasks_url,
-                             sizeof(config->pull_tasks_url),
-                             DEVICE_CLOUD_DEFAULT_PULL_URL);
-    device_cloud_copy_string(config->report_status_url,
-                             sizeof(config->report_status_url),
-                             DEVICE_CLOUD_DEFAULT_REPORT_URL);
+    device_utils_copy_safe_string(config->display_state_url,
+                                  sizeof(config->display_state_url),
+                                  DEVICE_CLOUD_DEFAULT_WEATHER_URL);
+    device_utils_copy_safe_string(config->pull_tasks_url,
+                                  sizeof(config->pull_tasks_url),
+                                  DEVICE_CLOUD_DEFAULT_PULL_URL);
+    device_utils_copy_safe_string(config->report_status_url,
+                                  sizeof(config->report_status_url),
+                                  DEVICE_CLOUD_DEFAULT_REPORT_URL);
 }
 
 static esp_err_t device_cloud_save_config(const device_cloud_config_t *config)
@@ -182,7 +177,7 @@ static esp_err_t device_cloud_save_config(const device_cloud_config_t *config)
     device_cloud_config_t persisted_config;
     esp_err_t ret = ESP_OK;
 
-    ret = nvs_open(DEVICE_CLOUD_NAMESPACE, NVS_READWRITE, &handle);
+    ret = nvs_open(STORAGE_KEY_DEVICE_CLOUD_NAMESPACE, NVS_READWRITE, &handle);
     if (ret != ESP_OK) {
         return ret;
     }
@@ -192,7 +187,7 @@ static esp_err_t device_cloud_save_config(const device_cloud_config_t *config)
     persisted_config.pull_tasks_url[0] = '\0';
     persisted_config.report_status_url[0] = '\0';
 
-    ret = nvs_set_blob(handle, DEVICE_CLOUD_CONFIG_KEY, &persisted_config, sizeof(persisted_config));
+    ret = nvs_set_blob(handle, STORAGE_KEY_DEVICE_CLOUD_CONFIG, &persisted_config, sizeof(persisted_config));
     if (ret == ESP_OK) {
         ret = nvs_commit(handle);
     }
@@ -203,10 +198,10 @@ static esp_err_t device_cloud_save_config(const device_cloud_config_t *config)
 
 static void device_cloud_store_config(const device_cloud_config_t *config)
 {
-    taskENTER_CRITICAL(&s_config_lock);
-    s_config = *config;
-    ++s_generation;
-    taskEXIT_CRITICAL(&s_config_lock);
+    taskENTER_CRITICAL(&s_cloud_config_lock);
+    s_cloud_config = *config;
+    ++s_config_version;
+    taskEXIT_CRITICAL(&s_cloud_config_lock);
 }
 
 static void device_cloud_try_set_string(const cJSON *root,
@@ -226,7 +221,7 @@ static void device_cloud_try_set_string(const cJSON *root,
         item = cJSON_GetObjectItemCaseSensitive(root, secondary_key);
     }
     if (cJSON_IsString(item) && (item->valuestring != NULL)) {
-        device_cloud_copy_string(destination, destination_size, item->valuestring);
+        device_utils_copy_safe_string(destination, destination_size, item->valuestring);
     }
 }
 
@@ -247,6 +242,19 @@ static void device_cloud_try_set_u32(const cJSON *root,
     }
     if (cJSON_IsNumber(item) && (item->valuedouble >= 0.0)) {
         *destination = (uint32_t)item->valuedouble;
+    }
+}
+
+void device_cloud_http_response_clear(device_cloud_http_response_t *response)
+{
+    if (response == NULL) {
+        return;
+    }
+    response->length = 0;
+    response->status_code = 0;
+    response->truncated = false;
+    if ((response->buffer != NULL) && (response->buffer_size > 0)) {
+        response->buffer[0] = '\0';
     }
 }
 
@@ -369,13 +377,13 @@ static esp_err_t device_cloud_session_prepare_client(device_cloud_session_t *ses
         return ESP_FAIL;
     }
 
-    device_cloud_copy_string(session->url, sizeof(session->url), url);
-    device_cloud_copy_string(session->auth_header_name,
-                             sizeof(session->auth_header_name),
-                             config_snapshot->auth_header_name);
-    device_cloud_copy_string(session->auth_header_value,
-                             sizeof(session->auth_header_value),
-                             config_snapshot->auth_header_value);
+    device_utils_copy_safe_string(session->url, sizeof(session->url), url);
+    device_utils_copy_safe_string(session->auth_header_name,
+                                  sizeof(session->auth_header_name),
+                                  config_snapshot->auth_header_name);
+    device_utils_copy_safe_string(session->auth_header_value,
+                                  sizeof(session->auth_header_value),
+                                  config_snapshot->auth_header_value);
     session->config_generation = generation;
 
     return ESP_OK;
@@ -389,17 +397,21 @@ esp_err_t device_cloud_service_init(void)
     bool should_save_config = false;
     esp_err_t ret = ESP_OK;
 
-    if (s_initialized) {
+    if (s_initialized_flag) {
         return ESP_OK;
     }
 
     device_cloud_init_defaults(&loaded_config);
 
-    ret = nvs_open(DEVICE_CLOUD_NAMESPACE, NVS_READWRITE, &handle);
+    ret = nvs_open(STORAGE_KEY_DEVICE_CLOUD_NAMESPACE, NVS_READWRITE, &handle);
     if (ret == ESP_OK) {
-        ret = nvs_get_blob(handle, DEVICE_CLOUD_CONFIG_KEY, &loaded_config, &required_size);
-        if ((ret != ESP_OK) || (required_size != sizeof(loaded_config))) {
+        ret = nvs_get_blob(handle, STORAGE_KEY_DEVICE_CLOUD_CONFIG, &loaded_config, &required_size);
+        if ((ret != ESP_OK) ||
+            ((required_size != sizeof(loaded_config)) && (required_size != DEVICE_CLOUD_CONFIG_LEGACY_SIZE))) {
             device_cloud_init_defaults(&loaded_config);
+            should_save_config = true;
+        } else if (required_size == DEVICE_CLOUD_CONFIG_LEGACY_SIZE) {
+            loaded_config.city[0] = '\0';
             should_save_config = true;
         } else if (device_cloud_config_has_persisted_urls(&loaded_config)) {
             should_save_config = true;
@@ -418,7 +430,7 @@ esp_err_t device_cloud_service_init(void)
     }
 
     device_cloud_store_config(&loaded_config);
-    s_initialized = true;
+    s_initialized_flag = true;
 
     ESP_LOGI(TAG, "Cloud config initialized for deviceId=%s", loaded_config.device_id);
     ESP_LOGI(TAG,
@@ -434,13 +446,13 @@ esp_err_t device_cloud_service_get_config(device_cloud_config_t *out_config)
     if (out_config == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (!s_initialized) {
+    if (!s_initialized_flag) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    taskENTER_CRITICAL(&s_config_lock);
-    *out_config = s_config;
-    taskEXIT_CRITICAL(&s_config_lock);
+    taskENTER_CRITICAL(&s_cloud_config_lock);
+    *out_config = s_cloud_config;
+    taskEXIT_CRITICAL(&s_cloud_config_lock);
 
     return ESP_OK;
 }
@@ -451,12 +463,14 @@ esp_err_t device_cloud_service_update_from_json(const char *json, size_t json_le
     device_cloud_config_t updated_config;
     cJSON *root = NULL;
     cJSON *config_object = NULL;
+    cJSON *type_item = NULL;
+    const char *message_type = NULL;
     esp_err_t ret = ESP_OK;
 
     if ((json == NULL) || (json_len == 0)) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (!s_initialized) {
+    if (!s_initialized_flag) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -476,9 +490,29 @@ esp_err_t device_cloud_service_update_from_json(const char *json, size_t json_le
         return ESP_ERR_INVALID_ARG;
     }
 
-    config_object = cJSON_GetObjectItemCaseSensitive(root, "cloudConfig");
-    if (!cJSON_IsObject(config_object)) {
+    if (!cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    type_item = cJSON_GetObjectItemCaseSensitive(root, "type");
+    if (cJSON_IsString(type_item) && (type_item->valuestring != NULL)) {
+        message_type = type_item->valuestring;
+    }
+
+    if (message_type != NULL) {
+        if (strcmp(message_type, "clientInfo") != 0) {
+            ESP_LOGW(TAG, "Ignored unsupported BLUFI custom data type: %s", message_type);
+            cJSON_Delete(root);
+            return ESP_OK;
+        }
         config_object = root;
+    } else {
+        config_object = cJSON_GetObjectItemCaseSensitive(root, "cloudConfig");
+        if (!cJSON_IsObject(config_object)) {
+            config_object = root;
+            ESP_LOGW(TAG, "Accepted legacy BLUFI client config format");
+        }
     }
 
     device_cloud_try_set_string(config_object,
@@ -502,10 +536,10 @@ esp_err_t device_cloud_service_update_from_json(const char *json, size_t json_le
                                 updated_config.client_id,
                                 sizeof(updated_config.client_id));
     device_cloud_try_set_string(config_object,
-                                "device_id",
-                                "deviceId",
-                                updated_config.device_id,
-                                sizeof(updated_config.device_id));
+                                "city",
+                                NULL,
+                                updated_config.city,
+                                sizeof(updated_config.city));
     device_cloud_try_set_string(config_object,
                                 "auth_header_name",
                                 "authHeaderName",
@@ -555,9 +589,9 @@ uint32_t device_cloud_service_get_generation(void)
 {
     uint32_t generation = 0;
 
-    taskENTER_CRITICAL(&s_config_lock);
-    generation = s_generation;
-    taskEXIT_CRITICAL(&s_config_lock);
+    taskENTER_CRITICAL(&s_cloud_config_lock);
+    generation = s_config_version;
+    taskEXIT_CRITICAL(&s_cloud_config_lock);
 
     return generation;
 }
@@ -644,14 +678,7 @@ esp_err_t device_cloud_session_post_json(device_cloud_session_t *session,
         response = &internal_response;
     }
 
-    if (response != NULL) {
-        response->length = 0;
-        response->status_code = 0;
-        response->truncated = false;
-        if ((response->buffer != NULL) && (response->buffer_size > 0)) {
-            response->buffer[0] = '\0';
-        }
-    }
+    device_cloud_http_response_clear(response);
     session->active_response = response;
 
     ret = esp_http_client_set_header(session->client, "Content-Type", "application/json");

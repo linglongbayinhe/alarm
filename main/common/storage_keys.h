@@ -1,0 +1,7 @@
+#ifndef STORAGE_KEYS_H
+#define STORAGE_KEYS_H
+
+#define STORAGE_KEY_DEVICE_CLOUD_NAMESPACE "dev_cloud"
+#define STORAGE_KEY_DEVICE_CLOUD_CONFIG "config_v1"
+
+#endif

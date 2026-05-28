@@ -12,7 +12,6 @@
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 #include "esp_system.h"
-#include "esp_mac.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
@@ -25,6 +24,8 @@
 #include "audio_cache_service.h"
 #include "audio_service.h"
 #include "device_cloud_service.h"
+#include "device_info.h"
+#include "device_utils.h"
 #include "display_service.h"
 #include "network_task_service.h"
 #include "playback_task_service.h"
@@ -41,6 +42,8 @@
 #define EXAMPLE_WIFI_CONNECTION_MAXIMUM_RETRY CONFIG_EXAMPLE_WIFI_CONNECTION_MAXIMUM_RETRY
 #define EXAMPLE_INVALID_REASON                255
 #define EXAMPLE_INVALID_RSSI                  -128
+#define EXAMPLE_PROVISIONING_SUCCESS_VISIBLE_MS 1500
+#define EXAMPLE_PROVISIONING_QR_FIELD_SIZE    48
 
 static void app_ui_task(void *arg);
 static esp_err_t app_start_display_services(const char *reason);
@@ -94,8 +97,15 @@ typedef struct {
     TaskHandle_t transition_task;
 } app_runtime_state_t;
 
+typedef struct {
+    display_provisioning_state_t state;
+    TickType_t success_hide_at;
+    char qr_payload[DISPLAY_PROVISIONING_QR_PAYLOAD_SIZE];
+} app_provisioning_ui_state_t;
+
 static app_wifi_state_t s_wifi_state;
 static app_runtime_state_t s_runtime_state;
+static app_provisioning_ui_state_t s_provisioning_ui_state;
 static bool s_display_services_started = false;
 
 static void app_log_internal_heap(const char *label)
@@ -207,6 +217,94 @@ static bool app_get_wifi_rssi(int *rssi_out)
     *rssi_out = ap_record.rssi;
 
     return true;
+}
+
+static void app_provisioning_set_state(display_provisioning_state_t state)
+{
+    s_provisioning_ui_state.state = state;
+    if (state == DISPLAY_PROVISIONING_STATE_SUCCESS) {
+        s_provisioning_ui_state.success_hide_at =
+            xTaskGetTickCount() + pdMS_TO_TICKS(EXAMPLE_PROVISIONING_SUCCESS_VISIBLE_MS);
+    } else {
+        s_provisioning_ui_state.success_hide_at = 0;
+    }
+}
+
+static void app_provisioning_update_success_timeout(void)
+{
+    if (s_provisioning_ui_state.state != DISPLAY_PROVISIONING_STATE_SUCCESS) {
+        return;
+    }
+    if ((int32_t)(xTaskGetTickCount() - s_provisioning_ui_state.success_hide_at) >= 0) {
+        app_provisioning_set_state(DISPLAY_PROVISIONING_STATE_HIDDEN);
+    }
+}
+
+static void app_json_escape_copy(char *destination, size_t destination_size, const char *source)
+{
+    size_t used = 0;
+
+    if ((destination == NULL) || (destination_size == 0)) {
+        return;
+    }
+
+    if (source == NULL) {
+        source = "";
+    }
+
+    while ((*source != '\0') && (used + 1 < destination_size)) {
+        if ((*source == '\\') || (*source == '"')) {
+            if (used + 2 >= destination_size) {
+                break;
+            }
+            destination[used++] = '\\';
+            destination[used++] = *source++;
+            continue;
+        }
+        destination[used++] = *source++;
+    }
+    destination[used] = '\0';
+}
+
+static void app_prepare_provisioning_qr_payload(void)
+{
+    char escaped_device_id[EXAMPLE_PROVISIONING_QR_FIELD_SIZE];
+    char escaped_ble_name[EXAMPLE_PROVISIONING_QR_FIELD_SIZE];
+    char device_id[DEVICE_ID_SIZE] = {0};
+    int written;
+    esp_err_t ret;
+
+    ret = device_utils_get_device_id(device_id, sizeof(device_id));
+    if (ret != ESP_OK) {
+        BLUFI_ERROR("Failed to build device id for QR payload: %s\n", esp_err_to_name(ret));
+        snprintf(device_id, sizeof(device_id), "%s", "unknown");
+    }
+
+    app_json_escape_copy(escaped_device_id, sizeof(escaped_device_id), device_id);
+    app_json_escape_copy(escaped_ble_name, sizeof(escaped_ble_name), CUSTOM_BLUFI_DEVICE_NAME);
+    written = snprintf(s_provisioning_ui_state.qr_payload,
+                       sizeof(s_provisioning_ui_state.qr_payload),
+                       "{\"type\":\"alarm_ble\",\"ver\":1,\"deviceId\":\"%s\",\"bleName\":\"%s\"}",
+                       escaped_device_id,
+                       escaped_ble_name);
+    if ((written < 0) || ((size_t)written >= sizeof(s_provisioning_ui_state.qr_payload))) {
+        BLUFI_ERROR("Provisioning QR payload was truncated\n");
+        s_provisioning_ui_state.qr_payload[0] = '\0';
+    }
+}
+
+static void app_apply_provisioning_view(display_view_model_t *view_model)
+{
+    if (view_model == NULL) {
+        return;
+    }
+
+    app_provisioning_update_success_timeout();
+    view_model->provisioning_state = s_provisioning_ui_state.state;
+    snprintf(view_model->provisioning_qr_payload,
+             sizeof(view_model->provisioning_qr_payload),
+             "%s",
+             s_provisioning_ui_state.qr_payload);
 }
 
 static esp_err_t app_start_display_services(const char *reason)
@@ -421,6 +519,7 @@ static void app_ui_task(void *arg)
             continue;
         }
 
+        app_apply_provisioning_view(&view_model);
         ret = display_service_render(&view_model);
         if (ret != ESP_OK) {
             BLUFI_ERROR("Display render failed: %s\n", esp_err_to_name(ret));
@@ -443,6 +542,11 @@ static void app_wifi_connect(void)
     ret = esp_wifi_connect();
     s_wifi_state.connecting = (ret == ESP_OK);
     BLUFI_INFO("WiFi connect requested: %s\n", esp_err_to_name(ret));
+    if (blufi_service_has_connect_request()) {
+        app_provisioning_set_state(ret == ESP_OK ?
+                                   DISPLAY_PROVISIONING_STATE_CONNECTING :
+                                   DISPLAY_PROVISIONING_STATE_FAILED);
+    }
     app_record_wifi_conn_info(EXAMPLE_INVALID_RSSI, EXAMPLE_INVALID_REASON);
     blufi_service_notify_wifi_status();
 }
@@ -494,6 +598,10 @@ static void app_ip_event_handler(void* arg, esp_event_base_t event_base,
         s_wifi_state.got_ip = true;
         BLUFI_INFO("WiFi got IP\n");
         app_log_internal_heap("got_ip");
+        if ((s_provisioning_ui_state.state != DISPLAY_PROVISIONING_STATE_HIDDEN) ||
+            blufi_service_has_connect_request()) {
+            app_provisioning_set_state(DISPLAY_PROVISIONING_STATE_SUCCESS);
+        }
         app_build_blufi_wifi_status(&status);
         blufi_service_on_wifi_got_ip(&status);
         ret = time_service_start_sntp();
@@ -550,9 +658,14 @@ static void app_wifi_event_handler(void* arg, esp_event_base_t event_base,
         if (s_wifi_state.connecting && !app_wifi_reconnect()) {
             s_wifi_state.connecting = false;
             app_record_wifi_conn_info(disconnected_event->rssi, disconnected_event->reason);
+            if (blufi_service_has_connect_request()) {
+                app_provisioning_set_state(DISPLAY_PROVISIONING_STATE_FAILED);
+            }
             blufi_service_notify_wifi_status();
             if (blufi_service_can_start()) {
                 BLUFI_INFO("Stored WiFi connection failed; starting BLUFI for reprovisioning\n");
+                app_prepare_provisioning_qr_payload();
+                app_provisioning_set_state(DISPLAY_PROVISIONING_STATE_QR);
                 (void)blufi_service_start();
             }
         }
@@ -611,13 +724,16 @@ static void app_start_connectivity(void)
     app_log_internal_heap("after_esp_wifi_init");
     ESP_ERROR_CHECK( app_clear_wifi_credentials_for_blufi_test() );
     ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
+    app_prepare_provisioning_qr_payload();
     config_ret = esp_wifi_get_config(WIFI_IF_STA, &stored_sta_config);
     s_wifi_state.has_stored_config = (config_ret == ESP_OK) && (stored_sta_config.sta.ssid[0] != '\0');
     if (s_wifi_state.has_stored_config) {
         blufi_service_set_sta_config(&stored_sta_config);
+        app_provisioning_set_state(DISPLAY_PROVISIONING_STATE_HIDDEN);
         BLUFI_INFO("Stored WiFi config found; skipping BLUFI startup\n");
     } else {
         BLUFI_INFO("No stored WiFi config; starting BLUFI provisioning\n");
+        app_provisioning_set_state(DISPLAY_PROVISIONING_STATE_QR);
         (void)blufi_service_start();
     }
     app_record_wifi_conn_info(EXAMPLE_INVALID_RSSI, EXAMPLE_INVALID_REASON);

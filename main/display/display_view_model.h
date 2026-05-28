@@ -26,6 +26,15 @@ typedef struct {
 
 #define DISPLAY_WEATHER_TEMPERATURE_TEXT_SIZE 12
 #define DISPLAY_WEATHER_CONDITION_TEXT_SIZE  64
+#define DISPLAY_PROVISIONING_QR_PAYLOAD_SIZE 256
+
+typedef enum {
+    DISPLAY_PROVISIONING_STATE_HIDDEN = 0,
+    DISPLAY_PROVISIONING_STATE_QR = 1,
+    DISPLAY_PROVISIONING_STATE_CONNECTING = 2,
+    DISPLAY_PROVISIONING_STATE_SUCCESS = 3,
+    DISPLAY_PROVISIONING_STATE_FAILED = 4,
+} display_provisioning_state_t;
 
 typedef struct display_weather_panel {
     bool visible;
@@ -37,6 +46,8 @@ typedef struct display_weather_panel {
 typedef struct {
     display_wifi_status_icon_t top_right_icon;
     display_weather_panel_t weather_panel;
+    display_provisioning_state_t provisioning_state;
+    char provisioning_qr_payload[DISPLAY_PROVISIONING_QR_PAYLOAD_SIZE];
     bool time_valid;
     struct tm current_time;
 } display_view_model_t;
