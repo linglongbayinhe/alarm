@@ -77,7 +77,7 @@ static uint8_t s_wifi_retry = 0;
 
 typedef struct {
     bool connected;
-    bool got_ip;
+    bool is_got_ip;
     bool connecting;
     bool has_stored_config;
     uint8_t bssid[6];
@@ -204,7 +204,7 @@ static bool app_get_wifi_rssi(int *rssi_out)
     wifi_ap_record_t ap_record = {0};
     esp_err_t ret = ESP_OK;
 
-    if ((rssi_out == NULL) || !s_wifi_state.got_ip) {
+    if ((rssi_out == NULL) || !s_wifi_state.is_got_ip) {
         return false;
     }
 
@@ -350,7 +350,7 @@ static esp_err_t app_start_runtime_services(void)
         playback_task_service_request_sync();
         return ESP_OK;
     }
-    if (!s_wifi_state.got_ip) {
+    if (!s_wifi_state.is_got_ip) {
         return ESP_ERR_INVALID_STATE;
     }
     if (blufi_service_is_runtime_blocked()) {
@@ -436,14 +436,14 @@ static void app_runtime_transition_task(void *arg)
 
     (void)arg;
 
-    if (s_wifi_state.got_ip) {
+    if (s_wifi_state.is_got_ip) {
         ret = blufi_service_release_if_ready();
         if (ret != ESP_OK) {
             BLUFI_ERROR("Deferred BLUFI release failed: %s\n", esp_err_to_name(ret));
         }
     }
 
-    if (s_wifi_state.got_ip) {
+    if (s_wifi_state.is_got_ip) {
         ret = app_start_runtime_services();
         if ((ret != ESP_OK) && (ret != ESP_ERR_INVALID_STATE)) {
             BLUFI_ERROR("Deferred runtime service start failed: %s\n", esp_err_to_name(ret));
@@ -490,7 +490,7 @@ static void app_ui_task(void *arg)
         memset(&presenter_input, 0, sizeof(presenter_input));
         memset(&view_model, 0, sizeof(view_model));
 
-        presenter_input.wifi_connected = s_wifi_state.got_ip;
+        presenter_input.wifi_connected = s_wifi_state.is_got_ip;
         presenter_input.time_valid = time_service_has_valid_time();
 
         if (presenter_input.wifi_connected) {
@@ -579,7 +579,7 @@ static void app_build_blufi_wifi_status(blufi_service_wifi_status_t *out_status)
 
     memset(out_status, 0, sizeof(*out_status));
     out_status->connected = s_wifi_state.connected;
-    out_status->got_ip = s_wifi_state.got_ip;
+    out_status->is_got_ip = s_wifi_state.is_got_ip;
     out_status->connecting = s_wifi_state.connecting;
     memcpy(out_status->bssid, s_wifi_state.bssid, sizeof(out_status->bssid));
     memcpy(out_status->ssid, s_wifi_state.ssid, sizeof(out_status->ssid));
@@ -595,7 +595,7 @@ static void app_ip_event_handler(void* arg, esp_event_base_t event_base,
         esp_err_t ret = ESP_OK;
 
         xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
-        s_wifi_state.got_ip = true;
+        s_wifi_state.is_got_ip = true;
         BLUFI_INFO("WiFi got IP\n");
         app_log_internal_heap("got_ip");
         if ((s_provisioning_ui_state.state != DISPLAY_PROVISIONING_STATE_HIDDEN) ||
@@ -672,7 +672,7 @@ static void app_wifi_event_handler(void* arg, esp_event_base_t event_base,
         /* This is a workaround as ESP32 WiFi libs don't currently
            auto-reassociate. */
         s_wifi_state.connected = false;
-        s_wifi_state.got_ip = false;
+        s_wifi_state.is_got_ip = false;
         memset(s_wifi_state.ssid, 0, 32);
         memset(s_wifi_state.bssid, 0, 6);
         s_wifi_state.ssid_len = 0;
@@ -832,6 +832,10 @@ static void app_blufi_request_startup_playback_pull(void *ctx)
 {
     (void)ctx;
 
+    if (!s_wifi_state.is_got_ip) {
+        BLUFI_INFO("Skip BLUFI startup playback pull because WiFi has no IP\n");
+        return;
+    }
     if (!s_runtime_state.startup_pull_done && s_runtime_state.network_started) {
         s_runtime_state.startup_pull_requested = true;
         network_task_service_request_playback_pull(NETWORK_TASK_PLAYBACK_REASON_STARTUP);
@@ -842,6 +846,10 @@ static void app_blufi_request_startup_weather_refresh(void *ctx)
 {
     (void)ctx;
 
+    if (!s_wifi_state.is_got_ip) {
+        BLUFI_INFO("Skip BLUFI startup weather refresh because WiFi has no IP\n");
+        return;
+    }
     if (!s_runtime_state.startup_weather_done && s_runtime_state.network_started) {
         s_runtime_state.startup_weather_requested = true;
         network_task_service_request_weather_refresh(NETWORK_TASK_WEATHER_REASON_STARTUP);
@@ -851,18 +859,31 @@ static void app_blufi_request_startup_weather_refresh(void *ctx)
 static void app_blufi_request_weather_refresh(void *ctx)
 {
     (void)ctx;
+    if (!s_wifi_state.is_got_ip) {
+        BLUFI_INFO("Skip BLUFI weather refresh request because WiFi has no IP\n");
+        return;
+    }
     weather_service_request_refresh();
 }
 
 static void app_blufi_request_playback_sync(void *ctx)
 {
     (void)ctx;
+    if (!s_wifi_state.is_got_ip) {
+        BLUFI_INFO("Skip BLUFI playback sync request because WiFi has no IP\n");
+        return;
+    }
     playback_task_service_request_sync();
 }
 
 static void app_blufi_cloud_config_changed(void *ctx)
 {
     (void)ctx;
+
+    if (!s_wifi_state.is_got_ip) {
+        BLUFI_INFO("Skip BLUFI cloud config sync because WiFi has no IP\n");
+        return;
+    }
 
     if (!s_runtime_state.startup_pull_done && s_runtime_state.network_started) {
         app_blufi_request_startup_playback_pull(NULL);

@@ -48,9 +48,14 @@
 #define BLUFI_DEVICE_INFO_DELAY_MS 100
 #define BLUFI_DISCONNECT_TASK_STACK_SIZE 2048
 #define BLUFI_DEVICE_INFO_TASK_STACK_SIZE 3072
+#define BLUFI_CUSTOM_DATA_TASK_STACK_SIZE 8192
 #define BLUFI_DISCONNECT_TASK_PRIORITY 4
 #define BLUFI_DEVICE_INFO_TASK_PRIORITY 4
+#define BLUFI_CUSTOM_DATA_TASK_PRIORITY 4
 #define BLUFI_DEVICE_INFO_PAYLOAD_SIZE 128
+
+static const char s_client_info_ack_ok[] = "{\"type\":\"clientInfoAck\",\"status\":\"ok\"}";
+static const char s_client_info_ack_error[] = "{\"type\":\"clientInfoAck\",\"status\":\"error\"}";
 
 typedef struct {
     bool ble_connected;
@@ -68,6 +73,11 @@ typedef struct {
     esp_blufi_extra_info_t conn_info;
 } blufi_service_state_t;
 
+typedef struct {
+    char *payload;
+    uint32_t payload_len;
+} blufi_custom_data_task_arg_t;
+
 static void blufi_service_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_t *param);
 
 static esp_blufi_callbacks_t s_blufi_callbacks = {
@@ -84,6 +94,18 @@ static blufi_service_state_t s_state;
 static wifi_config_t s_sta_config;
 
 static void blufi_service_log_internal_heap(const char *label);
+static void blufi_service_send_client_info_ack(bool ok);
+
+static void blufi_service_send_client_info_ack(bool ok)
+{
+    const char *ack = ok ? s_client_info_ack_ok : s_client_info_ack_error;
+    esp_err_t ret = esp_blufi_send_custom_data((uint8_t *)ack, (uint32_t)strlen(ack));
+    if (ret != ESP_OK) {
+        BLUFI_ERROR("Failed to send BLUFI clientInfoAck: %s\n", esp_err_to_name(ret));
+    } else {
+        BLUFI_INFO("BLUFI clientInfoAck sent: %s\n", ok ? "ok" : "error");
+    }
+}
 
 static void blufi_service_send_device_info_task(void *arg)
 {
@@ -167,11 +189,12 @@ static void blufi_service_request_wifi_connect_once(const char *reason)
                    reason == NULL ? "wifi_config" : reason,
                    s_state.ssid_received ? 1 : 0,
                    s_state.password_received ? 1 : 0);
+        blufi_service_notify_wifi_status();
         return;
     }
 
     s_state.connect_requested = true;
-    BLUFI_INFO("BLUFI auto wifi connect after %s\n", reason == NULL ? "wifi_config" : reason);
+    BLUFI_INFO("BLUFI wifi connect after %s\n", reason == NULL ? "wifi_config" : reason);
     blufi_service_log_internal_heap("auto_connect_to_ap");
 
     if (s_hooks.request_wifi_disconnect != NULL) {
@@ -427,7 +450,7 @@ void blufi_service_send_wifi_status_report(const blufi_service_wifi_status_t *st
         info.sta_ssid = (uint8_t *)status->ssid;
         info.sta_ssid_len = status->ssid_len;
         extra_info = &info;
-        sta_state = status->got_ip ? ESP_BLUFI_STA_CONN_SUCCESS : ESP_BLUFI_STA_NO_IP;
+        sta_state = status->is_got_ip ? ESP_BLUFI_STA_CONN_SUCCESS : ESP_BLUFI_STA_NO_IP;
     } else if (status->connecting) {
         sta_state = ESP_BLUFI_STA_CONNECTING;
     }
@@ -479,8 +502,46 @@ void blufi_service_send_wifi_list_from_scan(void)
     free(blufi_ap_list);
 }
 
+static void blufi_service_custom_data_task(void *arg)
+{
+    blufi_custom_data_task_arg_t *task_arg = (blufi_custom_data_task_arg_t *)arg;
+    bool changed = false;
+    bool ack_ok = false;
+    esp_err_t ret = ESP_OK;
+
+    if ((task_arg == NULL) || (task_arg->payload == NULL)) {
+        blufi_service_send_client_info_ack(false);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    BLUFI_INFO("blufi_custom stack_free=%u bytes\n",
+               (unsigned int)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
+    BLUFI_INFO("BLUFI custom data payload: %s\n", task_arg->payload);
+
+    ret = device_cloud_service_update_from_json(task_arg->payload, task_arg->payload_len, &changed);
+    if (ret != ESP_OK) {
+        BLUFI_ERROR("Failed to apply cloud config from custom data: %s\n", esp_err_to_name(ret));
+    } else {
+        ack_ok = true;
+        BLUFI_INFO("BLUFI clientInfo applied: changed=%d\n", changed ? 1 : 0);
+        if (changed) {
+            BLUFI_INFO("Cloud config updated from BLUFI custom data; network sync deferred until WiFi is connected\n");
+        }
+    }
+
+    blufi_service_send_client_info_ack(ack_ok);
+    BLUFI_INFO("blufi_custom stack_free_after=%u bytes\n",
+               (unsigned int)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
+    free(task_arg->payload);
+    free(task_arg);
+    vTaskDelete(NULL);
+}
+
 static void blufi_service_handle_custom_data(const uint8_t *data, uint32_t data_len)
 {
+    blufi_custom_data_task_arg_t *task_arg = NULL;
+
     BLUFI_INFO("Recv Custom Data %" PRIu32 "\n", data_len);
 #if CONFIG_APP_LOG_SENSITIVE_DATA
     ESP_LOG_BUFFER_HEX("Custom Data", data, data_len);
@@ -489,37 +550,39 @@ static void blufi_service_handle_custom_data(const uint8_t *data, uint32_t data_
 #endif
 
     if ((data == NULL) || (data_len == 0)) {
+        blufi_service_send_client_info_ack(false);
         return;
     }
 
-    char *payload = calloc(1, data_len + 1);
-    if (payload == NULL) {
+    task_arg = calloc(1, sizeof(*task_arg));
+    if (task_arg == NULL) {
+        BLUFI_ERROR("Failed to allocate custom data task argument\n");
+        blufi_service_send_client_info_ack(false);
+        return;
+    }
+
+    task_arg->payload = calloc(1, data_len + 1);
+    if (task_arg->payload == NULL) {
         BLUFI_ERROR("Failed to allocate custom data payload buffer\n");
+        free(task_arg);
+        blufi_service_send_client_info_ack(false);
         return;
     }
+    memcpy(task_arg->payload, data, data_len);
+    task_arg->payload[data_len] = '\0';
+    task_arg->payload_len = data_len;
 
-    memcpy(payload, data, data_len);
-    payload[data_len] = '\0';
-
-    bool changed = false;
-    esp_err_t ret = device_cloud_service_update_from_json(payload, data_len, &changed);
-    if (ret != ESP_OK) {
-        BLUFI_ERROR("Failed to apply cloud config from custom data: %s\n", esp_err_to_name(ret));
-    } else if (changed) {
-        BLUFI_INFO("Cloud config updated from BLUFI custom data\n");
-        if (s_hooks.cloud_config_changed != NULL) {
-            s_hooks.cloud_config_changed(s_hook_ctx);
-        } else {
-            if (s_hooks.request_weather_refresh != NULL) {
-                s_hooks.request_weather_refresh(s_hook_ctx);
-            }
-            if (s_hooks.request_playback_sync != NULL) {
-                s_hooks.request_playback_sync(s_hook_ctx);
-            }
-        }
+    if (xTaskCreate(blufi_service_custom_data_task,
+                    "blufi_custom",
+                    BLUFI_CUSTOM_DATA_TASK_STACK_SIZE,
+                    task_arg,
+                    BLUFI_CUSTOM_DATA_TASK_PRIORITY,
+                    NULL) != pdPASS) {
+        BLUFI_ERROR("Failed to create BLUFI custom data task\n");
+        free(task_arg->payload);
+        free(task_arg);
+        blufi_service_send_client_info_ack(false);
     }
-
-    free(payload);
 }
 
 static void blufi_service_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_t *param)
@@ -608,7 +671,7 @@ static void blufi_service_event_callback(esp_blufi_cb_event_t event, esp_blufi_c
             if (s_hooks.get_wifi_status(s_hook_ctx, &status)) {
                 blufi_service_send_wifi_status_report(&status);
                 BLUFI_INFO("BLUFI get WiFi STA status (got_ip=%d connected=%d connecting=%d ssid_received=%d password_received=%d connect_requested=%d)\n",
-                           status.got_ip ? 1 : 0,
+                           status.is_got_ip ? 1 : 0,
                            status.connected ? 1 : 0,
                            status.connecting ? 1 : 0,
                            s_state.ssid_received ? 1 : 0,
@@ -648,7 +711,7 @@ static void blufi_service_event_callback(esp_blufi_cb_event_t event, esp_blufi_c
                    s_sta_config.sta.ssid,
                    esp_err_to_name(ssid_set_config_ret));
         blufi_service_log_internal_heap("recv_sta_ssid");
-        blufi_service_request_wifi_connect_once("sta_ssid");
+        BLUFI_INFO("BLUFI wifi connect deferred until req_connect_to_ap after sta_ssid\n");
         break;
     }
     case ESP_BLUFI_EVENT_RECV_STA_PASSWD: {
@@ -667,7 +730,7 @@ static void blufi_service_event_callback(esp_blufi_cb_event_t event, esp_blufi_c
                    s_sta_config.sta.threshold.authmode,
                    esp_err_to_name(passwd_set_config_ret));
         blufi_service_log_internal_heap("recv_sta_password");
-        blufi_service_request_wifi_connect_once("sta_password");
+        BLUFI_INFO("BLUFI wifi credentials ready; waiting for req_connect_to_ap\n");
         break;
     }
     case ESP_BLUFI_EVENT_GET_WIFI_LIST: {

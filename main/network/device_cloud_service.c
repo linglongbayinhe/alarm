@@ -174,25 +174,36 @@ static void device_cloud_apply_defaults(device_cloud_config_t *config)
 static esp_err_t device_cloud_save_config(const device_cloud_config_t *config)
 {
     nvs_handle_t handle = 0;
-    device_cloud_config_t persisted_config;
+    device_cloud_config_t *persisted_config = NULL;
     esp_err_t ret = ESP_OK;
+
+    if (config == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    persisted_config = calloc(1, sizeof(*persisted_config));
+    if (persisted_config == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
 
     ret = nvs_open(STORAGE_KEY_DEVICE_CLOUD_NAMESPACE, NVS_READWRITE, &handle);
     if (ret != ESP_OK) {
+        free(persisted_config);
         return ret;
     }
 
-    persisted_config = *config;
-    persisted_config.display_state_url[0] = '\0';
-    persisted_config.pull_tasks_url[0] = '\0';
-    persisted_config.report_status_url[0] = '\0';
+    *persisted_config = *config;
+    persisted_config->display_state_url[0] = '\0';
+    persisted_config->pull_tasks_url[0] = '\0';
+    persisted_config->report_status_url[0] = '\0';
 
-    ret = nvs_set_blob(handle, STORAGE_KEY_DEVICE_CLOUD_CONFIG, &persisted_config, sizeof(persisted_config));
+    ret = nvs_set_blob(handle, STORAGE_KEY_DEVICE_CLOUD_CONFIG, persisted_config, sizeof(*persisted_config));
     if (ret == ESP_OK) {
         ret = nvs_commit(handle);
     }
 
     nvs_close(handle);
+    free(persisted_config);
     return ret;
 }
 
@@ -202,47 +213,6 @@ static void device_cloud_store_config(const device_cloud_config_t *config)
     s_cloud_config = *config;
     ++s_config_version;
     taskEXIT_CRITICAL(&s_cloud_config_lock);
-}
-
-static void device_cloud_try_set_string(const cJSON *root,
-                                        const char *primary_key,
-                                        const char *secondary_key,
-                                        char *destination,
-                                        size_t destination_size)
-{
-    const cJSON *item = NULL;
-
-    if ((root == NULL) || (destination == NULL) || (destination_size == 0)) {
-        return;
-    }
-
-    item = cJSON_GetObjectItemCaseSensitive(root, primary_key);
-    if ((item == NULL) && (secondary_key != NULL)) {
-        item = cJSON_GetObjectItemCaseSensitive(root, secondary_key);
-    }
-    if (cJSON_IsString(item) && (item->valuestring != NULL)) {
-        device_utils_copy_safe_string(destination, destination_size, item->valuestring);
-    }
-}
-
-static void device_cloud_try_set_u32(const cJSON *root,
-                                     const char *primary_key,
-                                     const char *secondary_key,
-                                     uint32_t *destination)
-{
-    const cJSON *item = NULL;
-
-    if ((root == NULL) || (destination == NULL)) {
-        return;
-    }
-
-    item = cJSON_GetObjectItemCaseSensitive(root, primary_key);
-    if ((item == NULL) && (secondary_key != NULL)) {
-        item = cJSON_GetObjectItemCaseSensitive(root, secondary_key);
-    }
-    if (cJSON_IsNumber(item) && (item->valuedouble >= 0.0)) {
-        *destination = (uint32_t)item->valuedouble;
-    }
 }
 
 void device_cloud_http_response_clear(device_cloud_http_response_t *response)
@@ -459,11 +429,12 @@ esp_err_t device_cloud_service_get_config(device_cloud_config_t *out_config)
 
 esp_err_t device_cloud_service_update_from_json(const char *json, size_t json_len, bool *changed)
 {
-    device_cloud_config_t current_config;
-    device_cloud_config_t updated_config;
+    device_cloud_config_t *current_config = NULL;
+    device_cloud_config_t *updated_config = NULL;
     cJSON *root = NULL;
-    cJSON *config_object = NULL;
     cJSON *type_item = NULL;
+    cJSON *client_id_item = NULL;
+    cJSON *city_item = NULL;
     const char *message_type = NULL;
     esp_err_t ret = ESP_OK;
 
@@ -478,111 +449,84 @@ esp_err_t device_cloud_service_update_from_json(const char *json, size_t json_le
         *changed = false;
     }
 
-    ret = device_cloud_service_get_config(&current_config);
-    if (ret != ESP_OK) {
-        return ret;
+    current_config = calloc(1, sizeof(*current_config));
+    updated_config = calloc(1, sizeof(*updated_config));
+    if ((current_config == NULL) || (updated_config == NULL)) {
+        ret = ESP_ERR_NO_MEM;
+        goto cleanup;
     }
 
-    updated_config = current_config;
+    ret = device_cloud_service_get_config(current_config);
+    if (ret != ESP_OK) {
+        goto cleanup;
+    }
+
+    *updated_config = *current_config;
     root = cJSON_ParseWithLength(json, json_len);
     if (root == NULL) {
         ESP_LOGE(TAG, "Failed to parse custom cloud config JSON");
-        return ESP_ERR_INVALID_ARG;
+        ret = ESP_ERR_INVALID_ARG;
+        goto cleanup;
     }
 
     if (!cJSON_IsObject(root)) {
-        cJSON_Delete(root);
-        return ESP_ERR_INVALID_ARG;
+        ret = ESP_ERR_INVALID_ARG;
+        goto cleanup;
     }
 
     type_item = cJSON_GetObjectItemCaseSensitive(root, "type");
     if (cJSON_IsString(type_item) && (type_item->valuestring != NULL)) {
         message_type = type_item->valuestring;
     }
-
-    if (message_type != NULL) {
-        if (strcmp(message_type, "clientInfo") != 0) {
-            ESP_LOGW(TAG, "Ignored unsupported BLUFI custom data type: %s", message_type);
-            cJSON_Delete(root);
-            return ESP_OK;
-        }
-        config_object = root;
-    } else {
-        config_object = cJSON_GetObjectItemCaseSensitive(root, "cloudConfig");
-        if (!cJSON_IsObject(config_object)) {
-            config_object = root;
-            ESP_LOGW(TAG, "Accepted legacy BLUFI client config format");
-        }
+    if ((message_type == NULL) || (strcmp(message_type, "clientInfo") != 0)) {
+        ESP_LOGW(TAG, "Rejected unsupported BLUFI custom data type");
+        ret = ESP_ERR_INVALID_ARG;
+        goto cleanup;
     }
 
-    device_cloud_try_set_string(config_object,
-                                "display_state_url",
-                                "displayStateUrl",
-                                updated_config.display_state_url,
-                                sizeof(updated_config.display_state_url));
-    device_cloud_try_set_string(config_object,
-                                "pull_tasks_url",
-                                "pullTasksUrl",
-                                updated_config.pull_tasks_url,
-                                sizeof(updated_config.pull_tasks_url));
-    device_cloud_try_set_string(config_object,
-                                "report_status_url",
-                                "reportStatusUrl",
-                                updated_config.report_status_url,
-                                sizeof(updated_config.report_status_url));
-    device_cloud_try_set_string(config_object,
-                                "client_id",
-                                "clientId",
-                                updated_config.client_id,
-                                sizeof(updated_config.client_id));
-    device_cloud_try_set_string(config_object,
-                                "city",
-                                NULL,
-                                updated_config.city,
-                                sizeof(updated_config.city));
-    device_cloud_try_set_string(config_object,
-                                "auth_header_name",
-                                "authHeaderName",
-                                updated_config.auth_header_name,
-                                sizeof(updated_config.auth_header_name));
-    device_cloud_try_set_string(config_object,
-                                "auth_header_value",
-                                "authHeaderValue",
-                                updated_config.auth_header_value,
-                                sizeof(updated_config.auth_header_value));
-    device_cloud_try_set_u32(config_object,
-                             "preload_window_hours",
-                             "preloadWindowHours",
-                             &updated_config.preload_window_hours);
-    device_cloud_try_set_u32(config_object,
-                             "display_poll_seconds",
-                             "displayPollSeconds",
-                             &updated_config.display_poll_seconds);
-    device_cloud_try_set_u32(config_object,
-                             "task_poll_seconds",
-                             "taskPollSeconds",
-                             &updated_config.task_poll_seconds);
-
-    device_cloud_apply_defaults(&updated_config);
-    if (memcmp(&current_config, &updated_config, sizeof(updated_config)) == 0) {
-        cJSON_Delete(root);
-        return ESP_OK;
+    client_id_item = cJSON_GetObjectItemCaseSensitive(root, "clientId");
+    city_item = cJSON_GetObjectItemCaseSensitive(root, "city");
+    if (!cJSON_IsString(client_id_item) ||
+        device_cloud_string_is_empty(client_id_item->valuestring) ||
+        !cJSON_IsString(city_item) ||
+        device_cloud_string_is_empty(city_item->valuestring)) {
+        ESP_LOGW(TAG, "Rejected incomplete BLUFI clientInfo custom data");
+        ret = ESP_ERR_INVALID_ARG;
+        goto cleanup;
     }
 
-    ret = device_cloud_save_config(&updated_config);
+    device_utils_copy_safe_string(updated_config->client_id,
+                                  sizeof(updated_config->client_id),
+                                  client_id_item->valuestring);
+    device_utils_copy_safe_string(updated_config->city,
+                                  sizeof(updated_config->city),
+                                  city_item->valuestring);
+
+    device_cloud_apply_defaults(updated_config);
+    if (memcmp(current_config, updated_config, sizeof(*updated_config)) == 0) {
+        ret = ESP_OK;
+        goto cleanup;
+    }
+
+    ret = device_cloud_save_config(updated_config);
     if (ret != ESP_OK) {
-        cJSON_Delete(root);
-        return ret;
+        goto cleanup;
     }
 
-    device_cloud_store_config(&updated_config);
+    device_cloud_store_config(updated_config);
     if (changed != NULL) {
         *changed = true;
     }
 
     ESP_LOGI(TAG, "Cloud config updated via BLUFI custom data");
-    cJSON_Delete(root);
-    return ESP_OK;
+
+cleanup:
+    if (root != NULL) {
+        cJSON_Delete(root);
+    }
+    free(updated_config);
+    free(current_config);
+    return ret;
 }
 
 uint32_t device_cloud_service_get_generation(void)

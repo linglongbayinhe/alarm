@@ -15,7 +15,7 @@
 
 typedef struct {
     bool connected;
-    bool got_ip;
+    bool is_got_ip;
     bool connecting;
     uint8_t bssid[6];
     uint8_t ssid[32];
