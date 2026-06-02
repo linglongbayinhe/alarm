@@ -80,7 +80,7 @@ static void weather_presenter_format_temperature(const weather_snapshot_t *snaps
         return;
     }
 
-    snprintf(buffer, buffer_size, "%dC", (int)snapshot->current_temperature_c);
+    snprintf(buffer, buffer_size, "%d\xE2\x84\x83", (int)snapshot->current_temperature_c);
 }
 
 esp_err_t weather_presenter_build_panel_model(const weather_snapshot_t *snapshot,
