@@ -148,6 +148,7 @@ static esp_err_t display_init_hardware(void)
 #endif
         .bits_per_pixel = 16,
     };
+#if DISPLAY_HAS_BACKLIGHT_GPIO
     gpio_config_t backlight_config = {
         .pin_bit_mask = 1ULL << DISPLAY_PIN_BACKLIGHT,
         .mode = GPIO_MODE_OUTPUT,
@@ -155,6 +156,7 @@ static esp_err_t display_init_hardware(void)
 
     ESP_RETURN_ON_ERROR(gpio_config(&backlight_config), TAG, "Backlight GPIO init failed");
     gpio_set_level(DISPLAY_PIN_BACKLIGHT, !DISPLAY_BACKLIGHT_ON_LEVEL);
+#endif
 
     ret = spi_bus_initialize(DISPLAY_SPI_HOST, &bus_config, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK) {
@@ -182,7 +184,9 @@ static esp_err_t display_init_hardware(void)
 #endif
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel, true), TAG, "Panel display on failed");
 
+#if DISPLAY_HAS_BACKLIGHT_GPIO
     gpio_set_level(DISPLAY_PIN_BACKLIGHT, DISPLAY_BACKLIGHT_ON_LEVEL);
+#endif
 
     ESP_LOGI(TAG,
              "ST7789 display initialized on project-local pin config (order=%s, invert=%d, endian=%s)",

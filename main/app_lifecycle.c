@@ -23,6 +23,7 @@
 
 #include "audio_cache_service.h"
 #include "audio_service.h"
+#include "button_service.h"
 #include "device_cloud_service.h"
 #include "device_info.h"
 #include "device_utils.h"
@@ -745,6 +746,11 @@ static void app_start_connectivity(void)
 static esp_err_t app_lifecycle_init_core_services(void)
 {
     esp_err_t ret = ESP_OK;
+
+    ret = button_service_init();
+    if (ret != ESP_OK) {
+        return ret;
+    }
 
     ret = device_cloud_service_init();
     if (ret != ESP_OK) {

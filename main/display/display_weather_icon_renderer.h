@@ -3,7 +3,7 @@
 
 #include "display_canvas.h"
 
-#define DISPLAY_WEATHER_ICON_RENDER_SIZE 40
+#define DISPLAY_WEATHER_ICON_RENDER_SIZE 64
 
 struct display_weather_panel;
 

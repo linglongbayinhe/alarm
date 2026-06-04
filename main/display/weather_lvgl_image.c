@@ -8,8 +8,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/** LVGL 9: 256 = 100% size, 512 = 200% (2x). */
-#define WEATHER_LVGL_IMAGE_ZOOM_2X 512
+/** LVGL 9: 256 = 100% size (1:1 with 64x64 render buffer). */
+#define WEATHER_LVGL_IMAGE_ZOOM_1X 256
 
 #define WEATHER_LVGL_ICON_PIXELS (DISPLAY_WEATHER_ICON_RENDER_SIZE * DISPLAY_WEATHER_ICON_RENDER_SIZE)
 #define WEATHER_LVGL_ICON_BYTES  (WEATHER_LVGL_ICON_PIXELS * (int)sizeof(uint16_t))
@@ -85,7 +85,7 @@ void weather_lvgl_image_update(lv_obj_t *img, const display_weather_panel_t *pan
     s_img_dsc.data_size = (uint32_t)WEATHER_LVGL_ICON_BYTES;
 
     lv_image_set_src(img, &s_img_dsc);
-    lv_image_set_scale(img, WEATHER_LVGL_IMAGE_ZOOM_2X);
+    lv_image_set_scale(img, WEATHER_LVGL_IMAGE_ZOOM_1X);
     lv_obj_invalidate(img);
 
     s_cached_icon = panel->icon;

@@ -1,5 +1,6 @@
 idf_component_register(SRCS "ble/blufi_service.c" "main.c"
                             "app_lifecycle.c"
+                            "button/button_service.c"
                             "audio/audio_cache_service.c"
                             "audio/audio_service.c"
                             "ble/blufi_security.c"
@@ -47,6 +48,7 @@ idf_component_register(SRCS "ble/blufi_service.c" "main.c"
                                   lvgl
                                   esp_lvgl_port
                     INCLUDE_DIRS "."
+                                 "button"
                                  "ble"
                                  "audio"
                                  "common"

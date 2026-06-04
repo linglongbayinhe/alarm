@@ -10,6 +10,7 @@
 #include "lvgl.h"
 #include "src/libs/qrcode/lv_qrcode.h"
 #include "src/libs/qrcode/qrcodegen.h"
+#include "display_config.h"
 #include "fonts.h"
 #include "screens.h"
 #include "status_lvgl_image.h"
@@ -20,6 +21,8 @@
 #define DISPLAY_LVGL_RENDERER_DATE_BUF_SIZE  16
 #define DISPLAY_LVGL_RENDERER_QR_SIZE        132
 #define DISPLAY_LVGL_RENDERER_QR_CACHE_SIZE  DISPLAY_PROVISIONING_QR_PAYLOAD_SIZE
+#define DISPLAY_WEATHER_LABEL_GAP_PX         8
+#define DISPLAY_WEATHER_RIGHT_MARGIN_PX      4
 
 #define DISPLAY_TEXT_PROVISION_HINT       "\xE8\xAF\xB7\xE7\x94\xA8\xE5\xB0\x8F\xE7\xA8\x8B\xE5\xBA\x8F\xE6\x89\xAB\xE7\xA0\x81\xE9\x85\x8D\xE7\xBD\x91"
 #define DISPLAY_TEXT_PROVISION_CONNECTING "\xE8\xBF\x9E\xE6\x8E\xA5\xE4\xB8\xAD\x2E\x2E\x2E"
@@ -67,6 +70,35 @@ static bool display_lvgl_renderer_copy_view_model(display_view_model_t *view_mod
     return valid;
 }
 
+static void display_lvgl_renderer_layout_temperature_label(void)
+{
+    int32_t weather_x;
+    int32_t weather_w;
+    int32_t temp_x;
+    int32_t temp_w;
+
+    if ((objects.weather_label == NULL) || (objects.temprature_label == NULL)) {
+        return;
+    }
+
+    lv_obj_update_layout(objects.weather_label);
+    lv_obj_update_layout(objects.temprature_label);
+
+    weather_x = lv_obj_get_x(objects.weather_label);
+    weather_w = lv_obj_get_width(objects.weather_label);
+    temp_w = lv_obj_get_width(objects.temprature_label);
+    temp_x = weather_x + weather_w + DISPLAY_WEATHER_LABEL_GAP_PX;
+
+    if ((temp_x + temp_w) > (DISPLAY_WIDTH - DISPLAY_WEATHER_RIGHT_MARGIN_PX)) {
+        temp_x = DISPLAY_WIDTH - DISPLAY_WEATHER_RIGHT_MARGIN_PX - temp_w;
+        if (temp_x < weather_x) {
+            temp_x = weather_x;
+        }
+    }
+
+    lv_obj_set_x(objects.temprature_label, temp_x);
+}
+
 static void display_lvgl_renderer_update_weather_labels(const display_weather_panel_t *panel)
 {
     const char *weather_text = "";
@@ -91,6 +123,10 @@ static void display_lvgl_renderer_update_weather_labels(const display_weather_pa
             lv_label_set_text(objects.temprature_label, temperature_text);
         }
         snprintf(s_last_temperature_text, sizeof(s_last_temperature_text), "%s", temperature_text);
+    }
+
+    if ((panel != NULL) && panel->visible) {
+        display_lvgl_renderer_layout_temperature_label();
     }
 
     s_weather_labels_cached = true;

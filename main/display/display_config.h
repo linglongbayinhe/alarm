@@ -1,12 +1,18 @@
 #ifndef DISPLAY_CONFIG_H
 #define DISPLAY_CONFIG_H
 
+#include "driver/gpio.h"
+
 #define DISPLAY_SPI_HOST SPI2_HOST
 
 #define DISPLAY_WIDTH 320
 #define DISPLAY_HEIGHT 240
 
+/* Backlight wired to 3.3V; GPIO13 used for device button. */
+#define DISPLAY_HAS_BACKLIGHT_GPIO 0
+#if DISPLAY_HAS_BACKLIGHT_GPIO
 #define DISPLAY_PIN_BACKLIGHT 13
+#endif
 #define DISPLAY_PIN_MOSI 23
 #define DISPLAY_PIN_SCLK 4
 #define DISPLAY_PIN_CS 18
