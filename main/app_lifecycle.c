@@ -690,7 +690,7 @@ static void app_wifi_event_handler(void* arg, esp_event_base_t event_base,
     return;
 }
 
-static esp_err_t app_clear_wifi_credentials_for_blufi_test(void)
+static esp_err_t __attribute__((unused)) app_clear_wifi_credentials_for_blufi_test(void)
 {
     esp_err_t ret = ESP_OK;
 
@@ -723,7 +723,7 @@ static void app_start_connectivity(void)
     app_log_internal_heap("before_esp_wifi_init");
     ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
     app_log_internal_heap("after_esp_wifi_init");
-    ESP_ERROR_CHECK( app_clear_wifi_credentials_for_blufi_test() );
+    /* Keep stored WiFi credentials while testing post-connect runtime features. */
     ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
     app_prepare_provisioning_qr_payload();
     config_ret = esp_wifi_get_config(WIFI_IF_STA, &stored_sta_config);

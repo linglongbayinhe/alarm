@@ -79,6 +79,7 @@ static char s_current_playing_path[AUDIO_CACHE_PATH_MAX];
 static void playback_task_mark_dirty(bool immediate);
 static void playback_task_flush_state_if_dirty(void);
 static void playback_task_log_next_due(time_t now);
+static const char *playback_task_status_to_string(playback_task_status_t status);
 
 static size_t playback_task_blob_size_for_count(size_t task_count)
 {
@@ -274,6 +275,140 @@ static bool playback_task_is_connected(void)
     return (xEventGroupGetBits(s_connected_event_group) & s_connected_bit) != 0;
 }
 
+static bool playback_task_is_leap_year(int year)
+{
+    return ((year % 4) == 0) && (((year % 100) != 0) || ((year % 400) == 0));
+}
+
+static bool playback_task_is_valid_utc_time(int year,
+                                            int month,
+                                            int day,
+                                            int hour,
+                                            int minute,
+                                            int second)
+{
+    static const int days_per_month[] = {
+        31, 28, 31, 30, 31, 30,
+        31, 31, 30, 31, 30, 31,
+    };
+    int max_day = 0;
+
+    if ((year < 1970) || (month < 1) || (month > 12) ||
+        (hour < 0) || (hour > 23) ||
+        (minute < 0) || (minute > 59) ||
+        (second < 0) || (second > 59)) {
+        return false;
+    }
+
+    max_day = days_per_month[month - 1];
+    if ((month == 2) && playback_task_is_leap_year(year)) {
+        max_day = 29;
+    }
+
+    return (day >= 1) && (day <= max_day);
+}
+
+static int64_t playback_task_utc_days_before_year(int year)
+{
+    int64_t years = (int64_t)year - 1970LL;
+    int64_t leap_days_before_year = ((int64_t)(year - 1) / 4LL) -
+                                    ((int64_t)(year - 1) / 100LL) +
+                                    ((int64_t)(year - 1) / 400LL);
+    int64_t leap_days_before_1970 = (1969LL / 4LL) - (1969LL / 100LL) + (1969LL / 400LL);
+
+    return (years * 365LL) + (leap_days_before_year - leap_days_before_1970);
+}
+
+static int64_t playback_task_utc_days_before_month(int year, int month)
+{
+    static const int days_before_month[] = {
+        0, 31, 59, 90, 120, 151,
+        181, 212, 243, 273, 304, 334,
+    };
+    int64_t days = days_before_month[month - 1];
+
+    if ((month > 2) && playback_task_is_leap_year(year)) {
+        ++days;
+    }
+
+    return days;
+}
+
+static bool playback_task_make_utc_epoch(int year,
+                                         int month,
+                                         int day,
+                                         int hour,
+                                         int minute,
+                                         int second,
+                                         int64_t *epoch_out)
+{
+    int64_t days = 0;
+
+    if ((epoch_out == NULL) ||
+        !playback_task_is_valid_utc_time(year, month, day, hour, minute, second)) {
+        return false;
+    }
+
+    days = playback_task_utc_days_before_year(year) +
+           playback_task_utc_days_before_month(year, month) +
+           ((int64_t)day - 1LL);
+    *epoch_out = (days * 86400LL) + ((int64_t)hour * 3600LL) +
+                 ((int64_t)minute * 60LL) + (int64_t)second;
+
+    return true;
+}
+
+static bool playback_task_parse_iso_utc_epoch(const char *value, int64_t *epoch_out)
+{
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    int matched = 0;
+    const char *cursor = NULL;
+    size_t value_len = 0;
+
+    if ((value == NULL) || (epoch_out == NULL)) {
+        return false;
+    }
+    value_len = strlen(value);
+    if ((value_len < 20U) ||
+        (value[4] != '-') || (value[7] != '-') || (value[10] != 'T') ||
+        (value[13] != ':') || (value[16] != ':')) {
+        return false;
+    }
+
+    matched = sscanf(value,
+                     "%4d-%2d-%2dT%2d:%2d:%2d",
+                     &year,
+                     &month,
+                     &day,
+                     &hour,
+                     &minute,
+                     &second);
+    if (matched != 6) {
+        return false;
+    }
+
+    cursor = value + 19;
+    if (*cursor == '.') {
+        ++cursor;
+        if (!isdigit((unsigned char)*cursor)) {
+            return false;
+        }
+        while (isdigit((unsigned char)*cursor)) {
+            ++cursor;
+        }
+    }
+    if ((cursor[0] != 'Z') || (cursor[1] != '\0')) {
+        return false;
+    }
+
+    return playback_task_make_utc_epoch(year, month, day, hour, minute, second, epoch_out);
+}
+
 static bool playback_task_parse_epoch_from_string(const char *value, int64_t *epoch_out)
 {
     struct tm time_info = {0};
@@ -295,6 +430,10 @@ static bool playback_task_parse_epoch_from_string(const char *value, int64_t *ep
             *epoch_out = numeric > 20000000000LL ? (numeric / 1000LL) : numeric;
             return true;
         }
+    }
+
+    if (playback_task_parse_iso_utc_epoch(value, epoch_out)) {
+        return true;
     }
 
     for (index = 0; index < (sizeof(formats) / sizeof(formats[0])); ++index) {
@@ -428,6 +567,41 @@ static bool playback_task_should_keep_remote_task(const playback_task_t *task,
     }
 
     return true;
+}
+
+static void playback_task_log_skip_remote_task(const playback_task_t *task,
+                                               time_t now,
+                                               uint32_t preload_window_hours)
+{
+    int64_t latest_epoch = (int64_t)now + ((int64_t)preload_window_hours * 3600LL);
+    int64_t earliest_epoch = (int64_t)now - PLAYBACK_TASK_HTTP_GRACE_SECONDS;
+    const char *reason = "unknown";
+
+    if (task == NULL) {
+        return;
+    }
+
+    if (task->ring_at_epoch < earliest_epoch) {
+        reason = "expired";
+    } else if (task->ring_at_epoch > latest_epoch) {
+        reason = "beyond_preload_window";
+    } else if ((task->task_status == PLAYBACK_TASK_STATUS_FINISHED) ||
+               (task->task_status == PLAYBACK_TASK_STATUS_FAILED)) {
+        reason = "terminal_status";
+    }
+
+    ESP_LOGI(TAG,
+             "Skipping playback task: reason=%s instance=%s ring_at=%" PRId64
+             " now=%" PRId64 " earliest=%" PRId64 " latest=%" PRId64
+             " status=%s preload_hours=%u",
+             reason,
+             task->instance_id,
+             task->ring_at_epoch,
+             (int64_t)now,
+             earliest_epoch,
+             latest_epoch,
+             playback_task_status_to_string((playback_task_status_t)task->task_status),
+             (unsigned int)preload_window_hours);
 }
 
 static void playback_task_merge_cached_fields(playback_task_t *new_task, const playback_task_t *existing_task)
@@ -696,6 +870,7 @@ static esp_err_t playback_task_apply_cloud_response(const char *json,
             continue;
         }
         if (!playback_task_should_keep_remote_task(&parsed_task, now, config.preload_window_hours)) {
+            playback_task_log_skip_remote_task(&parsed_task, now, config.preload_window_hours);
             continue;
         }
 
