@@ -70,5 +70,13 @@ menu "Example Configuration"
                 Development-only switch. Keep disabled for production so Wi-Fi
                 passwords and custom provisioning payloads are never printed.
 
+        config APP_FORCE_BLUFI_PROVISIONING_ON_BOOT
+            bool "Force BLUFI provisioning on boot"
+            default n
+            help
+                Development-only switch. When enabled, the device clears stored
+                Wi-Fi credentials on every boot so the provisioning QR code is
+                shown and BLUFI provisioning can be tested repeatedly.
+
     endmenu
 endmenu
