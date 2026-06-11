@@ -47,6 +47,8 @@
 #define EXAMPLE_PROVISIONING_QR_FIELD_SIZE    48
 
 static void app_ui_task(void *arg);
+static void app_audio_mix_test_task(void *arg);
+static void app_start_audio_mix_test_once(void);
 static esp_err_t app_start_display_services(const char *reason);
 static void app_schedule_runtime_transition(void);
 static void app_startup_pull_done(esp_err_t ret, void *ctx);
@@ -65,6 +67,11 @@ static void app_blufi_cloud_config_changed(void *ctx);
 #define EXAMPLE_UI_TASK_PRIORITY   5
 #define EXAMPLE_RUNTIME_TRANSITION_TASK_STACK_SIZE 4096
 #define EXAMPLE_RUNTIME_TRANSITION_TASK_PRIORITY   4
+#define EXAMPLE_AUDIO_MIX_TEST_TASK_STACK_SIZE 8192
+#define EXAMPLE_AUDIO_MIX_TEST_TASK_PRIORITY   3
+#define EXAMPLE_AUDIO_MIX_TEST_NETWORK_IDLE_WAIT_MS 2000
+#define EXAMPLE_AUDIO_MIX_TEST_BGM_PATH        STORAGE_SERVICE_INTERNAL_BASE_PATH "/bgm_gentle.mp3"
+#define EXAMPLE_AUDIO_MIX_TEST_VOICE_PATH      STORAGE_SERVICE_INTERNAL_BASE_PATH "/human_voice.mp3"
 
 /* FreeRTOS event group to signal when we are connected & ready to make a request */
 static EventGroupHandle_t wifi_event_group;
@@ -95,6 +102,7 @@ typedef struct {
     bool startup_weather_done;
     bool network_degraded;
     bool weather_degraded;
+    bool mix_test_started;
     TaskHandle_t transition_task;
 } app_runtime_state_t;
 
@@ -403,6 +411,7 @@ static esp_err_t app_start_runtime_services(void)
     app_log_internal_heap("after_weather_start");
 
     s_runtime_state.services_started = true;
+    app_start_audio_mix_test_once();
     return ESP_OK;
 }
 
@@ -469,6 +478,55 @@ static void app_schedule_runtime_transition(void)
                     &s_runtime_state.transition_task) != pdPASS) {
         s_runtime_state.transition_task = NULL;
         BLUFI_ERROR("Failed to create runtime transition task\n");
+    }
+}
+
+static void app_audio_mix_test_task(void *arg)
+{
+    esp_err_t ret = ESP_OK;
+    bool network_idle = false;
+
+    (void)arg;
+
+    network_task_service_set_https_suspended(true);
+    network_task_service_reset_sessions();
+    network_idle = network_task_service_wait_idle(EXAMPLE_AUDIO_MIX_TEST_NETWORK_IDLE_WAIT_MS);
+    if (!network_idle) {
+        ESP_LOGW(BLUFI_EXAMPLE_TAG, "Temporary audio mix test continuing before network queue is idle");
+    }
+
+    BLUFI_INFO("Temporary audio mix test start: bgm=%s voice=%s\n",
+               EXAMPLE_AUDIO_MIX_TEST_BGM_PATH,
+               EXAMPLE_AUDIO_MIX_TEST_VOICE_PATH);
+    ret = audio_service_play_mix(EXAMPLE_AUDIO_MIX_TEST_BGM_PATH,
+                                 EXAMPLE_AUDIO_MIX_TEST_VOICE_PATH);
+    if (ret != ESP_OK) {
+        BLUFI_ERROR("Temporary audio mix test failed: %s\n", esp_err_to_name(ret));
+    } else {
+        BLUFI_INFO("Temporary audio mix test finished\n");
+    }
+
+    BLUFI_INFO("audio_mix_test stack_free=%u bytes\n",
+               (unsigned int)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
+    network_task_service_set_https_suspended(false);
+
+    vTaskDelete(NULL);
+}
+
+static void app_start_audio_mix_test_once(void)
+{
+    if (s_runtime_state.mix_test_started) {
+        return;
+    }
+
+    s_runtime_state.mix_test_started = true;
+    if (xTaskCreate(app_audio_mix_test_task,
+                    "audio_mix_test",
+                    EXAMPLE_AUDIO_MIX_TEST_TASK_STACK_SIZE,
+                    NULL,
+                    EXAMPLE_AUDIO_MIX_TEST_TASK_PRIORITY,
+                    NULL) != pdPASS) {
+        BLUFI_ERROR("Failed to create temporary audio mix test task\n");
     }
 }
 

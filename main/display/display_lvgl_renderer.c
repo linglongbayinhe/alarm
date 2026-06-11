@@ -293,7 +293,7 @@ static void display_lvgl_renderer_ensure_provisioning_objects(void)
     s_provision_container = lv_obj_create(parent);
     lv_obj_set_pos(s_provision_container, 0, 0);
     lv_obj_set_size(s_provision_container, 320, 240);
-    lv_obj_set_style_bg_color(s_provision_container, lv_color_white(), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(s_provision_container, lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(s_provision_container, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(s_provision_container, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_radius(s_provision_container, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -318,7 +318,7 @@ static void display_lvgl_renderer_ensure_provisioning_objects(void)
     lv_obj_set_width(s_provision_message, 300);
     lv_obj_set_pos(s_provision_message, 10, 196);
     lv_obj_set_style_text_align(s_provision_message, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(s_provision_message, lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(s_provision_message, lv_color_white(), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(s_provision_message,
                                &ui_font_source_han_sans_sc_normal_16,
                                LV_PART_MAIN | LV_STATE_DEFAULT);

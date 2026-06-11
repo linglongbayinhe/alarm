@@ -17,6 +17,7 @@ esp_err_t audio_service_play(const char *path,
                              audio_service_format_t format,
                              uint8_t volume_percent,
                              uint32_t max_duration_ms);
+esp_err_t audio_service_play_mix(const char *path_a, const char *path_b);
 bool audio_service_is_ready(void);
 
 #endif

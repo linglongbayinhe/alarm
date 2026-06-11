@@ -8,7 +8,7 @@
 #define STATUS_LVGL_ICON_SIDE 34
 #define STATUS_LVGL_ICON_PIXELS (STATUS_LVGL_ICON_SIDE * STATUS_LVGL_ICON_SIDE)
 #define STATUS_LVGL_ICON_BYTES  (STATUS_LVGL_ICON_PIXELS * (int)sizeof(uint16_t))
-#define STATUS_LVGL_COLOR_BLACK 0x0000
+#define STATUS_LVGL_COLOR_WHITE 0xFFFF
 #define STATUS_LVGL_COLOR_RED   0xF800
 #define STATUS_LVGL_WIFI_ORIGIN_OFFSET_X 18
 #define STATUS_LVGL_WIFI_ORIGIN_OFFSET_Y 17
@@ -211,7 +211,7 @@ static void status_lvgl_draw_wifi_icon(const display_wifi_status_icon_t *icon, d
                                    STATUS_LVGL_WIFI_ORIGIN_OFFSET_X,
                                    STATUS_LVGL_WIFI_ORIGIN_OFFSET_Y,
                                    STATUS_LVGL_WIFI_DOT_RADIUS,
-                                   STATUS_LVGL_COLOR_BLACK);
+                                   STATUS_LVGL_COLOR_WHITE);
 
     for (int band_index = 0; band_index < band_count; ++band_index) {
         int outer_radius = STATUS_LVGL_WIFI_FIRST_OUTER_RADIUS +
@@ -220,7 +220,7 @@ static void status_lvgl_draw_wifi_icon(const display_wifi_status_icon_t *icon, d
         status_lvgl_draw_wifi_sector_band(canvas,
                                           inner_radius,
                                           outer_radius,
-                                          STATUS_LVGL_COLOR_BLACK);
+                                          STATUS_LVGL_COLOR_WHITE);
     }
 
     if (icon->variant == DISPLAY_STATUS_ICON_VARIANT_ALERT) {
