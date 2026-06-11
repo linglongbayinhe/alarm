@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #include "audio_cache_service.h"
@@ -26,6 +27,8 @@ static const char *TAG = "PLAYBACK_TASK";
 static const char *PLAYBACK_TASK_NAMESPACE = "playback";
 static const char *PLAYBACK_TASK_BLOB_KEY = "tasks_v1";
 
+#define PLAYBACK_TASK_BLOB_MAGIC                 0x50544231U
+#define PLAYBACK_TASK_BLOB_VERSION               5U
 #define PLAYBACK_TASK_TASK_STACK_SIZE             6144
 #define PLAYBACK_TASK_TASK_PRIORITY               4
 #define PLAYBACK_TASK_HTTP_GRACE_SECONDS          300
@@ -38,6 +41,7 @@ static const char *PLAYBACK_TASK_BLOB_KEY = "tasks_v1";
 #define PLAYBACK_TASK_SAVE_DELAY_MS               3000
 #define PLAYBACK_TASK_DEFAULT_VOLUME_PERCENT      50
 #define PLAYBACK_TASK_NETWORK_IDLE_WAIT_MS        2000
+#define PLAYBACK_TASK_DEFAULT_VOICE               "gentle"
 
 typedef struct {
     uint32_t magic;
@@ -112,6 +116,64 @@ static bool playback_task_string_equals_ignore_case(const char *left, const char
     return (left != NULL) && (right != NULL) && (*left == '\0') && (*right == '\0');
 }
 
+static bool playback_task_is_valid_voice_name(const char *voice)
+{
+    const unsigned char *cursor = (const unsigned char *)voice;
+
+    if ((voice == NULL) || (voice[0] == '\0')) {
+        return false;
+    }
+
+    while (*cursor != '\0') {
+        if (!isalnum(*cursor) && (*cursor != '_') && (*cursor != '-')) {
+            return false;
+        }
+        ++cursor;
+    }
+
+    return true;
+}
+
+static bool playback_task_file_exists(const char *path)
+{
+    struct stat info = {0};
+
+    return (path != NULL) && (path[0] != '\0') && (stat(path, &info) == 0);
+}
+
+static esp_err_t playback_task_build_bgm_path(const playback_task_t *task,
+                                              char *path_buffer,
+                                              size_t path_buffer_size)
+{
+    const char *voice = PLAYBACK_TASK_DEFAULT_VOICE;
+    int written = 0;
+
+    if ((path_buffer == NULL) || (path_buffer_size == 0U)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if ((task != NULL) && playback_task_is_valid_voice_name(task->voice)) {
+        voice = task->voice;
+    } else if ((task != NULL) && (task->voice[0] != '\0')) {
+        ESP_LOGW(TAG,
+                 "Invalid voice name for %s: voice=%s; using %s",
+                 task->instance_id,
+                 task->voice,
+                 PLAYBACK_TASK_DEFAULT_VOICE);
+    }
+
+    written = snprintf(path_buffer,
+                       path_buffer_size,
+                       "%s/bgm_%s.mp3",
+                       STORAGE_SERVICE_INTERNAL_BASE_PATH,
+                       voice);
+    if ((written < 0) || ((size_t)written >= path_buffer_size)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    return ESP_OK;
+}
+
 static int playback_task_compare_ring_time(const void *left, const void *right)
 {
     const playback_task_t *left_task = (const playback_task_t *)left;
@@ -139,8 +201,8 @@ static esp_err_t playback_task_save_state_to_nvs(void)
         return ESP_ERR_NO_MEM;
     }
 
-    blob->magic = 0x50544231U;
-    blob->version = 4;
+    blob->magic = PLAYBACK_TASK_BLOB_MAGIC;
+    blob->version = PLAYBACK_TASK_BLOB_VERSION;
     blob->task_count = (uint32_t)s_task_count;
     if (s_task_count > 0) {
         memcpy(blob->tasks, s_tasks, sizeof(playback_task_t) * s_task_count);
@@ -218,8 +280,8 @@ static void playback_task_load_state(void)
     }
 
     if (nvs_get_blob(handle, PLAYBACK_TASK_BLOB_KEY, blob, &blob_size) == ESP_OK) {
-        if ((blob->magic == 0x50544231U) &&
-            (blob->version == 4U) &&
+        if ((blob->magic == PLAYBACK_TASK_BLOB_MAGIC) &&
+            (blob->version == PLAYBACK_TASK_BLOB_VERSION) &&
             (blob->task_count <= PLAYBACK_TASK_MAX_COUNT) &&
             (blob_size >= playback_task_blob_size_for_count(blob->task_count))) {
             s_task_count = blob->task_count;
@@ -645,6 +707,7 @@ static esp_err_t playback_task_parse_remote_object(const cJSON *task_object,
     const cJSON *title = NULL;
     const cJSON *audio_download_url = NULL;
     const cJSON *fallback_mode = NULL;
+    const cJSON *voice = NULL;
     const cJSON *status = NULL;
     int64_t ring_at_epoch = 0;
 
@@ -672,6 +735,7 @@ static esp_err_t playback_task_parse_remote_object(const cJSON *task_object,
     title = cJSON_GetObjectItemCaseSensitive(task_object, "title");
     audio_download_url = cJSON_GetObjectItemCaseSensitive(task_object, "audioDownloadUrl");
     fallback_mode = cJSON_GetObjectItemCaseSensitive(task_object, "fallbackMode");
+    voice = cJSON_GetObjectItemCaseSensitive(task_object, "voice");
     status = cJSON_GetObjectItemCaseSensitive(task_object, "status");
 
     if (cJSON_IsString(alarm_id) && (alarm_id->valuestring != NULL)) {
@@ -697,6 +761,11 @@ static esp_err_t playback_task_parse_remote_object(const cJSON *task_object,
         playback_task_copy_string(task->fallback_mode,
                                   sizeof(task->fallback_mode),
                                   fallback_mode->valuestring);
+    }
+    if (cJSON_IsString(voice) && (voice->valuestring != NULL)) {
+        playback_task_copy_string(task->voice,
+                                  sizeof(task->voice),
+                                  voice->valuestring);
     }
     if (cJSON_IsString(status) && (status->valuestring != NULL)) {
         if (playback_task_string_equals_ignore_case(status->valuestring, "finished")) {
@@ -974,7 +1043,9 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
 {
     const char *play_path = NULL;
     char cached_path[AUDIO_CACHE_PATH_MAX] = {0};
+    char bgm_path[AUDIO_CACHE_PATH_MAX] = {0};
     audio_service_format_t format = AUDIO_SERVICE_FORMAT_AUTO;
+    bool using_cached_audio = false;
     esp_err_t ret = ESP_OK;
 
     if (task == NULL) {
@@ -983,9 +1054,11 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
 
     if (playback_task_find_cached_audio(task, cached_path, sizeof(cached_path))) {
         play_path = cached_path;
+        using_cached_audio = true;
         ESP_LOGI(TAG,
-                 "Playback source: cached audio path=%s volume=%u",
+                 "Playback source: cached audio path=%s voice=%s volume=%u",
                  play_path,
+                 task->voice[0] == '\0' ? PLAYBACK_TASK_DEFAULT_VOICE : task->voice,
                  (unsigned int)s_current_volume_percent);
     } else if (playback_task_allows_fallback(task) && storage_service_default_audio_exists()) {
         play_path = storage_service_get_default_audio_path();
@@ -1021,7 +1094,41 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
     (void)network_task_service_wait_idle(PLAYBACK_TASK_NETWORK_IDLE_WAIT_MS);
 
     playback_task_copy_string(s_current_playing_path, sizeof(s_current_playing_path), play_path);
-    ret = audio_service_play(play_path, format, s_current_volume_percent, 0);
+    if (using_cached_audio) {
+        ret = playback_task_build_bgm_path(task, bgm_path, sizeof(bgm_path));
+        if (ret == ESP_OK) {
+            if (playback_task_file_exists(bgm_path)) {
+                ESP_LOGI(TAG,
+                         "Playback mix source: voice=%s audio=%s bgm=%s",
+                         task->voice[0] == '\0' ? PLAYBACK_TASK_DEFAULT_VOICE : task->voice,
+                         play_path,
+                         bgm_path);
+                ret = audio_service_play_mix(play_path, bgm_path);
+                if (ret != ESP_OK) {
+                    ESP_LOGW(TAG,
+                             "Mix playback failed for %s with bgm=%s: %s; falling back to voice only",
+                             task->instance_id,
+                             bgm_path,
+                             esp_err_to_name(ret));
+                    ret = audio_service_play(play_path, format, s_current_volume_percent, 0);
+                }
+            } else {
+                ESP_LOGW(TAG,
+                         "BGM file missing for %s: bgm=%s; playing voice only",
+                         task->instance_id,
+                         bgm_path);
+                ret = audio_service_play(play_path, format, s_current_volume_percent, 0);
+            }
+        } else {
+            ESP_LOGW(TAG,
+                     "Failed to build BGM path for %s: %s; playing voice only",
+                     task->instance_id,
+                     esp_err_to_name(ret));
+            ret = audio_service_play(play_path, format, s_current_volume_percent, 0);
+        }
+    } else {
+        ret = audio_service_play(play_path, format, s_current_volume_percent, 0);
+    }
     s_current_playing_path[0] = '\0';
     if ((ret != ESP_OK) &&
         (format == AUDIO_SERVICE_FORMAT_AUTO) &&

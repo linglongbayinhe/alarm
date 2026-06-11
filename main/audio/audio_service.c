@@ -750,6 +750,16 @@ typedef struct {
     uint8_t bits_per_sample;
     bool info_ready;
     bool exhausted;
+    uint32_t output_sample_rate;
+    uint64_t resample_step_q32;
+    uint64_t resample_phase_q32;
+    int16_t resample_prev_left;
+    int16_t resample_prev_right;
+    int16_t resample_next_left;
+    int16_t resample_next_right;
+    bool resample_initialized;
+    bool resample_has_prev;
+    bool resample_has_next;
 } audio_service_mix_stream_t;
 
 static void audio_service_mix_stream_close(audio_service_mix_stream_t *stream)
@@ -1073,6 +1083,132 @@ static esp_err_t audio_service_mix_stream_read_frame(audio_service_mix_stream_t 
     return ESP_OK;
 }
 
+static int16_t audio_service_mix_lerp_sample(int16_t from, int16_t to, uint32_t frac_q32)
+{
+    int64_t delta = (int64_t)to - (int64_t)from;
+    int64_t scaled_delta = (delta * (int64_t)frac_q32) / (int64_t)(1ULL << 32);
+    int64_t interpolated = (int64_t)from + scaled_delta;
+
+    if (interpolated > INT16_MAX) {
+        return INT16_MAX;
+    }
+    if (interpolated < INT16_MIN) {
+        return INT16_MIN;
+    }
+
+    return (int16_t)interpolated;
+}
+
+static esp_err_t audio_service_mix_stream_init_resampler(audio_service_mix_stream_t *stream)
+{
+    esp_err_t ret = ESP_OK;
+    bool has_frame = false;
+
+    if ((stream == NULL) || (stream->sample_rate == 0U) || (stream->output_sample_rate == 0U)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    stream->resample_initialized = true;
+    stream->resample_phase_q32 = 0;
+    stream->resample_step_q32 = (((uint64_t)stream->sample_rate) << 32) /
+                                (uint64_t)stream->output_sample_rate;
+    if (stream->resample_step_q32 == 0U) {
+        stream->resample_step_q32 = 1U;
+    }
+
+    ret = audio_service_mix_stream_read_frame(stream,
+                                              &stream->resample_prev_left,
+                                              &stream->resample_prev_right,
+                                              &has_frame);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    if (!has_frame) {
+        return ESP_OK;
+    }
+    stream->resample_has_prev = true;
+
+    ret = audio_service_mix_stream_read_frame(stream,
+                                              &stream->resample_next_left,
+                                              &stream->resample_next_right,
+                                              &has_frame);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    stream->resample_has_next = has_frame;
+
+    return ESP_OK;
+}
+
+static esp_err_t audio_service_mix_stream_read_output_frame(audio_service_mix_stream_t *stream,
+                                                           int16_t *left,
+                                                           int16_t *right,
+                                                           bool *has_frame)
+{
+    esp_err_t ret = ESP_OK;
+
+    if ((stream == NULL) || (left == NULL) || (right == NULL) || (has_frame == NULL)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if ((stream->output_sample_rate == 0U) || (stream->sample_rate == stream->output_sample_rate)) {
+        return audio_service_mix_stream_read_frame(stream, left, right, has_frame);
+    }
+
+    *left = 0;
+    *right = 0;
+    *has_frame = false;
+
+    if (!stream->resample_initialized) {
+        ret = audio_service_mix_stream_init_resampler(stream);
+        if (ret != ESP_OK) {
+            return ret;
+        }
+    }
+    if (!stream->resample_has_prev) {
+        return ESP_OK;
+    }
+
+    if (stream->resample_has_next) {
+        uint32_t frac_q32 = (uint32_t)(stream->resample_phase_q32 & 0xFFFFFFFFULL);
+
+        *left = audio_service_mix_lerp_sample(stream->resample_prev_left,
+                                              stream->resample_next_left,
+                                              frac_q32);
+        *right = audio_service_mix_lerp_sample(stream->resample_prev_right,
+                                               stream->resample_next_right,
+                                               frac_q32);
+    } else {
+        *left = stream->resample_prev_left;
+        *right = stream->resample_prev_right;
+    }
+    *has_frame = true;
+
+    stream->resample_phase_q32 += stream->resample_step_q32;
+    while (stream->resample_phase_q32 >= (1ULL << 32)) {
+        bool has_next = false;
+
+        stream->resample_phase_q32 -= (1ULL << 32);
+        if (!stream->resample_has_next) {
+            stream->resample_has_prev = false;
+            break;
+        }
+
+        stream->resample_prev_left = stream->resample_next_left;
+        stream->resample_prev_right = stream->resample_next_right;
+        ret = audio_service_mix_stream_read_frame(stream,
+                                                  &stream->resample_next_left,
+                                                  &stream->resample_next_right,
+                                                  &has_next);
+        if (ret != ESP_OK) {
+            return ret;
+        }
+        stream->resample_has_next = has_next;
+    }
+
+    return ESP_OK;
+}
+
 static int16_t audio_service_mix_sample(int16_t sample_a, bool has_a, int16_t sample_b, bool has_b)
 {
     int32_t mixed = 0;
@@ -1130,19 +1266,11 @@ esp_err_t audio_service_play_mix(const char *path_a, const char *path_b)
         ESP_LOGE(TAG, "Mix info failed for path_b=%s: %s", path_b, esp_err_to_name(ret));
         goto cleanup;
     }
-    if (stream_a.sample_rate != stream_b.sample_rate) {
-        ESP_LOGE(TAG,
-                 "Mix sample rate mismatch: path_a=%s rate_a=%" PRIu32 " path_b=%s rate_b=%" PRIu32,
-                 path_a,
-                 stream_a.sample_rate,
-                 path_b,
-                 stream_b.sample_rate);
-        ret = ESP_ERR_NOT_SUPPORTED;
-        goto cleanup;
-    }
+    stream_a.output_sample_rate = stream_a.sample_rate;
+    stream_b.output_sample_rate = stream_a.sample_rate;
 
     ESP_LOGI(TAG,
-             "Mix playback start: a=%s format=%s rate=%" PRIu32 " channels=%u b=%s format=%s rate=%" PRIu32 " channels=%u",
+             "Mix playback start: a=%s format=%s rate=%" PRIu32 " channels=%u b=%s format=%s rate=%" PRIu32 " channels=%u output_rate=%" PRIu32,
              path_a,
              audio_service_format_name(stream_a.format),
              stream_a.sample_rate,
@@ -1150,7 +1278,8 @@ esp_err_t audio_service_play_mix(const char *path_a, const char *path_b)
              path_b,
              audio_service_format_name(stream_b.format),
              stream_b.sample_rate,
-             stream_b.channels);
+             stream_b.channels,
+             stream_a.output_sample_rate);
 
     ret = audio_service_ensure_i2s(stream_a.sample_rate);
     if (ret != ESP_OK) {
@@ -1174,11 +1303,11 @@ esp_err_t audio_service_play_mix(const char *path_a, const char *path_b)
             bool has_a = false;
             bool has_b = false;
 
-            ret = audio_service_mix_stream_read_frame(&stream_a, &left_a, &right_a, &has_a);
+            ret = audio_service_mix_stream_read_output_frame(&stream_a, &left_a, &right_a, &has_a);
             if (ret != ESP_OK) {
                 goto cleanup;
             }
-            ret = audio_service_mix_stream_read_frame(&stream_b, &left_b, &right_b, &has_b);
+            ret = audio_service_mix_stream_read_output_frame(&stream_b, &left_b, &right_b, &has_b);
             if (ret != ESP_OK) {
                 goto cleanup;
             }

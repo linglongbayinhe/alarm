@@ -13,6 +13,7 @@
 #define PLAYBACK_TASK_ID_SIZE 48
 #define PLAYBACK_TASK_TITLE_SIZE 64
 #define PLAYBACK_TASK_FALLBACK_MODE_SIZE 24
+#define PLAYBACK_TASK_VOICE_SIZE 24
 
 typedef enum {
     PLAYBACK_TASK_STATUS_PENDING = 0,
@@ -39,6 +40,7 @@ typedef struct {
     char audio_id[AUDIO_CACHE_ID_SIZE];
     char local_path[AUDIO_CACHE_PATH_MAX];
     char fallback_mode[PLAYBACK_TASK_FALLBACK_MODE_SIZE];
+    char voice[PLAYBACK_TASK_VOICE_SIZE];
     uint8_t task_status;
     uint8_t audio_status;
     int64_t expires_at_epoch;
