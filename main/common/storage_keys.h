@@ -3,5 +3,7 @@
 
 #define STORAGE_KEY_DEVICE_CLOUD_NAMESPACE "dev_cloud"
 #define STORAGE_KEY_DEVICE_CLOUD_CONFIG "config_v1"
+#define STORAGE_KEY_APP_CONTROL_NAMESPACE "app_ctrl"
+#define STORAGE_KEY_APP_FORCE_BLUFI_ONCE "force_blufi"
 
 #endif

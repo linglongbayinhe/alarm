@@ -10,7 +10,9 @@
 #include <time.h>
 
 #include "audio_cache_service.h"
+#include "audio_config.h"
 #include "audio_service.h"
+#include "audio_volume_service.h"
 #include "cJSON.h"
 #include "device_cloud_service.h"
 #include "esp_heap_caps.h"
@@ -39,7 +41,6 @@ static const char *PLAYBACK_TASK_BLOB_KEY = "tasks_v1";
 #define PLAYBACK_TASK_NOTIFY_AUDIO_RESULT         BIT3
 #define PLAYBACK_TASK_TIME_WAIT_MS                5000
 #define PLAYBACK_TASK_SAVE_DELAY_MS               3000
-#define PLAYBACK_TASK_DEFAULT_VOLUME_PERCENT      50
 #define PLAYBACK_TASK_NETWORK_IDLE_WAIT_MS        2000
 #define PLAYBACK_TASK_DEFAULT_VOICE               "gentle"
 
@@ -68,7 +69,6 @@ static TimerHandle_t s_save_timer;
 static bool s_force_sync = true;
 static bool s_state_dirty;
 static uint32_t s_last_config_generation;
-static uint8_t s_current_volume_percent = PLAYBACK_TASK_DEFAULT_VOLUME_PERCENT;
 static portMUX_TYPE s_pull_result_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_pull_result_pending;
 static esp_err_t s_pull_result_ret = ESP_OK;
@@ -589,8 +589,10 @@ static void playback_task_update_volume_from_response(const cJSON *root, const c
 
     target_volume = cJSON_GetObjectItemCaseSensitive(root, "targetVolume");
     if (playback_task_parse_target_volume(target_volume, &parsed_volume)) {
-        s_current_volume_percent = parsed_volume;
-        ESP_LOGI(TAG, "Alarm volume set to %u%% from targetVolume", (unsigned int)s_current_volume_percent);
+        audio_volume_service_set_current_percent(parsed_volume);
+        ESP_LOGI(TAG,
+                 "Alarm volume set to %u%% from targetVolume",
+                 (unsigned int)audio_volume_service_get_current_percent());
         return;
     }
 
@@ -602,9 +604,9 @@ static void playback_task_update_volume_from_response(const cJSON *root, const c
         const cJSON *task_object = cJSON_GetArrayItem(task_array, index);
         target_volume = cJSON_GetObjectItemCaseSensitive(task_object, "targetVolume");
         if (playback_task_parse_target_volume(target_volume, &parsed_volume)) {
-            s_current_volume_percent = parsed_volume;
+            audio_volume_service_set_current_percent(parsed_volume);
             ESP_LOGI(TAG, "Alarm volume set to %u%% from task targetVolume",
-                     (unsigned int)s_current_volume_percent);
+                     (unsigned int)audio_volume_service_get_current_percent());
             return;
         }
     }
@@ -1046,6 +1048,7 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
     char bgm_path[AUDIO_CACHE_PATH_MAX] = {0};
     audio_service_format_t format = AUDIO_SERVICE_FORMAT_AUTO;
     bool using_cached_audio = false;
+    uint8_t volume_percent = audio_volume_service_get_current_percent();
     esp_err_t ret = ESP_OK;
 
     if (task == NULL) {
@@ -1059,7 +1062,7 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
                  "Playback source: cached audio path=%s voice=%s volume=%u",
                  play_path,
                  task->voice[0] == '\0' ? PLAYBACK_TASK_DEFAULT_VOICE : task->voice,
-                 (unsigned int)s_current_volume_percent);
+                 (unsigned int)volume_percent);
     } else if (playback_task_allows_fallback(task) && storage_service_default_audio_exists()) {
         play_path = storage_service_get_default_audio_path();
         format = AUDIO_SERVICE_FORMAT_AUTO;
@@ -1067,7 +1070,7 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
                  "Playback source: default audio path=%s fallbackMode=%s volume=%u",
                  play_path,
                  task->fallback_mode,
-                 (unsigned int)s_current_volume_percent);
+                 (unsigned int)volume_percent);
     } else {
         ESP_LOGW(TAG,
                  "No playable audio for %s: localPath=%s audioId=%s audioHash=%" PRIu32 " fallbackMode=%s fallbackAllowed=%d defaultPath=%s defaultExists=%d",
@@ -1099,35 +1102,36 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
         if (ret == ESP_OK) {
             if (playback_task_file_exists(bgm_path)) {
                 ESP_LOGI(TAG,
-                         "Playback mix source: voice=%s audio=%s bgm=%s",
+                         "Playback mix source: voice=%s audio=%s bgm=%s volume=%u",
                          task->voice[0] == '\0' ? PLAYBACK_TASK_DEFAULT_VOICE : task->voice,
                          play_path,
-                         bgm_path);
-                ret = audio_service_play_mix(play_path, bgm_path);
+                         bgm_path,
+                         (unsigned int)volume_percent);
+                ret = audio_service_play_mix(play_path, bgm_path, volume_percent);
                 if (ret != ESP_OK) {
                     ESP_LOGW(TAG,
                              "Mix playback failed for %s with bgm=%s: %s; falling back to voice only",
                              task->instance_id,
                              bgm_path,
                              esp_err_to_name(ret));
-                    ret = audio_service_play(play_path, format, s_current_volume_percent, 0);
+                    ret = audio_service_play(play_path, format, volume_percent, 0);
                 }
             } else {
                 ESP_LOGW(TAG,
                          "BGM file missing for %s: bgm=%s; playing voice only",
                          task->instance_id,
                          bgm_path);
-                ret = audio_service_play(play_path, format, s_current_volume_percent, 0);
+                ret = audio_service_play(play_path, format, volume_percent, 0);
             }
         } else {
             ESP_LOGW(TAG,
                      "Failed to build BGM path for %s: %s; playing voice only",
                      task->instance_id,
                      esp_err_to_name(ret));
-            ret = audio_service_play(play_path, format, s_current_volume_percent, 0);
+            ret = audio_service_play(play_path, format, volume_percent, 0);
         }
     } else {
-        ret = audio_service_play(play_path, format, s_current_volume_percent, 0);
+        ret = audio_service_play(play_path, format, volume_percent, 0);
     }
     s_current_playing_path[0] = '\0';
     if ((ret != ESP_OK) &&
@@ -1138,10 +1142,10 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
         task->audio_status = PLAYBACK_AUDIO_STATUS_FAILED;
         playback_task_copy_string(s_current_playing_path,
                                   sizeof(s_current_playing_path),
-                                  storage_service_get_default_audio_path());
+                                 storage_service_get_default_audio_path());
         ret = audio_service_play(storage_service_get_default_audio_path(),
                                  AUDIO_SERVICE_FORMAT_AUTO,
-                                 s_current_volume_percent,
+                                 volume_percent,
                                  0);
         s_current_playing_path[0] = '\0';
     }
@@ -1767,4 +1771,76 @@ void playback_task_service_request_sync(void)
     if (s_task_handle != NULL) {
         xTaskNotify(s_task_handle, PLAYBACK_TASK_NOTIFY_SYNC, eSetBits);
     }
+}
+
+esp_err_t playback_task_service_stop_current(void)
+{
+    if (s_current_playing_path[0] == '\0') {
+        ESP_LOGI(TAG, "Stop requested but no playback task is currently playing");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Stop requested for current playback task path=%s", s_current_playing_path);
+    return audio_service_stop();
+}
+
+esp_err_t playback_task_service_play_startup_mix_test(const char *voice_path,
+                                                      const char *fallback_voice_path,
+                                                      const char *bgm_path)
+{
+    const char *selected_voice_path = voice_path;
+    uint8_t previous_volume = audio_volume_service_get_current_percent();
+    esp_err_t ret = ESP_OK;
+
+    ESP_LOGI(TAG, "============test: playback_task_service_play_startup_mix_test=============");
+    if ((voice_path == NULL) || (voice_path[0] == '\0') ||
+        (bgm_path == NULL) || (bgm_path[0] == '\0')) {
+        ESP_LOGW(TAG, "Startup mix test skipped: invalid path voice=%s fallback=%s bgm=%s",
+                 voice_path == NULL ? "" : voice_path,
+                 fallback_voice_path == NULL ? "" : fallback_voice_path,
+                 bgm_path == NULL ? "" : bgm_path);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!playback_task_file_exists(voice_path)) {
+        if ((fallback_voice_path != NULL) &&
+            (fallback_voice_path[0] != '\0') &&
+            playback_task_file_exists(fallback_voice_path)) {
+            selected_voice_path = fallback_voice_path;
+            ESP_LOGW(TAG,
+                     "Startup mix test voice missing path=%s; using fallback=%s",
+                     voice_path,
+                     fallback_voice_path);
+        } else {
+            ESP_LOGW(TAG,
+                     "Startup mix test skipped: voice file missing path=%s fallback=%s",
+                     voice_path,
+                     fallback_voice_path == NULL ? "" : fallback_voice_path);
+            return ESP_ERR_NOT_FOUND;
+        }
+    }
+    if (!playback_task_file_exists(bgm_path)) {
+        ESP_LOGW(TAG, "Startup mix test skipped: BGM file missing path=%s", bgm_path);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    audio_volume_service_set_current_percent(DEFAULT_VOLUME_PERCENT);
+    ESP_LOGI(TAG,
+             "Startup mix test volume set to %u%%",
+             (unsigned int)audio_volume_service_get_current_percent());
+    ESP_LOGI(TAG,
+             "Startup mix test start: voice=%s bgm=%s volume=%u",
+             selected_voice_path,
+             bgm_path,
+             (unsigned int)audio_volume_service_get_current_percent());
+    playback_task_copy_string(s_current_playing_path, sizeof(s_current_playing_path), selected_voice_path);
+    ret = audio_service_play_mix(selected_voice_path,
+                                 bgm_path,
+                                 audio_volume_service_get_current_percent());
+    s_current_playing_path[0] = '\0';
+    audio_volume_service_set_current_percent(previous_volume);
+    ESP_LOGI(TAG, "Startup mix test end: voice=%s bgm=%s result=%s",
+             selected_voice_path,
+             bgm_path,
+             esp_err_to_name(ret));
+    return ret;
 }

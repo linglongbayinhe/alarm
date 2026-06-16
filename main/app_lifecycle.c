@@ -6,6 +6,7 @@
 
 
 #include <assert.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -16,6 +17,7 @@
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "nvs.h"
 
 #include "app_lifecycle.h"
 #include "blufi_service.h"
@@ -32,6 +34,7 @@
 #include "playback_task_service.h"
 #include "rtc_service.h"
 #include "status_presenter.h"
+#include "storage_keys.h"
 #include "storage_service.h"
 #include "time_service.h"
 #include "weather_service.h"
@@ -65,6 +68,8 @@ static void app_blufi_cloud_config_changed(void *ctx);
 #define EXAMPLE_UI_TASK_PRIORITY   5
 #define EXAMPLE_RUNTIME_TRANSITION_TASK_STACK_SIZE 4096
 #define EXAMPLE_RUNTIME_TRANSITION_TASK_PRIORITY   4
+#define EXAMPLE_STARTUP_MIX_TEST_TASK_STACK_SIZE 6144
+#define EXAMPLE_STARTUP_MIX_TEST_TASK_PRIORITY   4
 
 /* FreeRTOS event group to signal when we are connected & ready to make a request */
 static EventGroupHandle_t wifi_event_group;
@@ -108,6 +113,9 @@ static app_wifi_state_t s_wifi_state;
 static app_runtime_state_t s_runtime_state;
 static app_provisioning_ui_state_t s_provisioning_ui_state;
 static bool s_display_services_started = false;
+#if CONFIG_APP_STARTUP_MIX_TEST_ENABLE
+static bool s_startup_mix_test_started = false;
+#endif
 
 static void app_log_internal_heap(const char *label)
 {
@@ -294,6 +302,54 @@ static void app_prepare_provisioning_qr_payload(void)
     }
 }
 
+static esp_err_t app_set_force_blufi_once(void)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t ret = nvs_open(STORAGE_KEY_APP_CONTROL_NAMESPACE, NVS_READWRITE, &handle);
+
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = nvs_set_u8(handle, STORAGE_KEY_APP_FORCE_BLUFI_ONCE, 1);
+    if (ret == ESP_OK) {
+        ret = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return ret;
+}
+
+static bool app_take_force_blufi_once(void)
+{
+    nvs_handle_t handle = 0;
+    uint8_t force_blufi = 0;
+    esp_err_t ret = nvs_open(STORAGE_KEY_APP_CONTROL_NAMESPACE, NVS_READWRITE, &handle);
+
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        return false;
+    }
+    if (ret != ESP_OK) {
+        BLUFI_ERROR("Failed to open app control NVS: %s\n", esp_err_to_name(ret));
+        return false;
+    }
+
+    ret = nvs_get_u8(handle, STORAGE_KEY_APP_FORCE_BLUFI_ONCE, &force_blufi);
+    if (ret == ESP_OK) {
+        esp_err_t clear_ret = nvs_erase_key(handle, STORAGE_KEY_APP_FORCE_BLUFI_ONCE);
+        if (clear_ret == ESP_OK) {
+            clear_ret = nvs_commit(handle);
+        }
+        if (clear_ret != ESP_OK) {
+            BLUFI_ERROR("Failed to clear force BLUFI flag: %s\n", esp_err_to_name(clear_ret));
+        }
+    } else if (ret != ESP_ERR_NVS_NOT_FOUND) {
+        BLUFI_ERROR("Failed to read force BLUFI flag: %s\n", esp_err_to_name(ret));
+    }
+
+    nvs_close(handle);
+    return (ret == ESP_OK) && (force_blufi != 0U);
+}
+
 static void app_apply_provisioning_view(display_view_model_t *view_model)
 {
     if (view_model == NULL) {
@@ -342,6 +398,43 @@ static esp_err_t app_start_display_services(const char *reason)
     return ESP_OK;
 }
 
+#if CONFIG_APP_STARTUP_MIX_TEST_ENABLE
+static void app_startup_mix_test_task(void *arg)
+{
+    esp_err_t ret = ESP_OK;
+
+    (void)arg;
+    BLUFI_INFO("Startup mix test task started voice=%s fallback=%s bgm=%s\n",
+               CONFIG_APP_STARTUP_MIX_TEST_VOICE_PATH,
+               CONFIG_APP_STARTUP_MIX_TEST_FALLBACK_VOICE_PATH,
+               CONFIG_APP_STARTUP_MIX_TEST_BGM_PATH);
+    ret = playback_task_service_play_startup_mix_test(CONFIG_APP_STARTUP_MIX_TEST_VOICE_PATH,
+                                                      CONFIG_APP_STARTUP_MIX_TEST_FALLBACK_VOICE_PATH,
+                                                      CONFIG_APP_STARTUP_MIX_TEST_BGM_PATH);
+    if ((ret != ESP_OK) && (ret != ESP_ERR_NOT_FOUND) && (ret != ESP_ERR_INVALID_ARG)) {
+        BLUFI_ERROR("Startup mix test failed: %s\n", esp_err_to_name(ret));
+    }
+    vTaskDelete(NULL);
+}
+
+static void app_startup_mix_test_start_once(void)
+{
+    if (s_startup_mix_test_started) {
+        return;
+    }
+
+    s_startup_mix_test_started = true;
+    if (xTaskCreate(app_startup_mix_test_task,
+                    "startup_mix",
+                    EXAMPLE_STARTUP_MIX_TEST_TASK_STACK_SIZE,
+                    NULL,
+                    EXAMPLE_STARTUP_MIX_TEST_TASK_PRIORITY,
+                    NULL) != pdPASS) {
+        BLUFI_ERROR("Failed to create startup mix test task\n");
+    }
+}
+#endif
+
 static esp_err_t app_start_runtime_services(void)
 {
     esp_err_t ret = ESP_OK;
@@ -367,6 +460,9 @@ static esp_err_t app_start_runtime_services(void)
         }
         s_runtime_state.network_started = true;
         app_log_internal_heap("after_network_start");
+#if CONFIG_APP_STARTUP_MIX_TEST_ENABLE
+        app_startup_mix_test_start_once();
+#endif
     }
 
     if (!s_runtime_state.startup_pull_done) {
@@ -712,6 +808,7 @@ static void app_start_connectivity(void)
 {
     wifi_config_t stored_sta_config = {0};
     esp_err_t config_ret = ESP_OK;
+    bool force_blufi_once = false;
 
     ESP_ERROR_CHECK(esp_netif_init());
     wifi_event_group = xEventGroupCreate();
@@ -730,9 +827,16 @@ static void app_start_connectivity(void)
 #endif
     ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
     app_prepare_provisioning_qr_payload();
+    force_blufi_once = app_take_force_blufi_once();
     config_ret = esp_wifi_get_config(WIFI_IF_STA, &stored_sta_config);
-    s_wifi_state.has_stored_config = (config_ret == ESP_OK) && (stored_sta_config.sta.ssid[0] != '\0');
-    if (s_wifi_state.has_stored_config) {
+    s_wifi_state.has_stored_config = !force_blufi_once &&
+                                     (config_ret == ESP_OK) &&
+                                     (stored_sta_config.sta.ssid[0] != '\0');
+    if (force_blufi_once) {
+        BLUFI_INFO("Force BLUFI provisioning requested; starting provisioning QR flow\n");
+        app_provisioning_set_state(DISPLAY_PROVISIONING_STATE_QR);
+        (void)blufi_service_start();
+    } else if (s_wifi_state.has_stored_config) {
         blufi_service_set_sta_config(&stored_sta_config);
         app_provisioning_set_state(DISPLAY_PROVISIONING_STATE_HIDDEN);
         BLUFI_INFO("Stored WiFi config found; skipping BLUFI startup\n");
@@ -903,6 +1007,24 @@ static void app_blufi_cloud_config_changed(void *ctx)
         app_blufi_request_weather_refresh(NULL);
         app_blufi_request_playback_sync(NULL);
     }
+}
+
+esp_err_t app_lifecycle_request_reprovision(uint32_t press_ms)
+{
+    esp_err_t ret = app_set_force_blufi_once();
+
+    if (ret != ESP_OK) {
+        BLUFI_ERROR("Failed to request BLUFI reprovision press_ms=%" PRIu32 ": %s\n",
+                    press_ms,
+                    esp_err_to_name(ret));
+        return ret;
+    }
+
+    BLUFI_INFO("BLUFI reprovision requested by long press press_ms=%" PRIu32 "; restarting\n",
+               press_ms);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_restart();
+    return ESP_OK;
 }
 
 esp_err_t app_lifecycle_boot(void)

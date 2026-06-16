@@ -78,5 +78,35 @@ menu "Example Configuration"
                 Wi-Fi credentials on every boot so the provisioning QR code is
                 shown and BLUFI provisioning can be tested repeatedly.
 
+        config APP_STARTUP_MIX_TEST_ENABLE
+            bool "Play startup mix test after runtime services start"
+            default n
+            help
+                Development-only switch. When enabled, the device plays one
+                temporary voice+BGM mix after runtime services finish startup so
+                the double-click alarm stop behavior can be validated.
+
+        config APP_STARTUP_MIX_TEST_BGM_PATH
+            string "Startup mix test BGM path"
+            depends on APP_STARTUP_MIX_TEST_ENABLE
+            default "/spiffs/bgm_gentle.mp3"
+            help
+                BGM file path used by the temporary startup mix test.
+
+        config APP_STARTUP_MIX_TEST_VOICE_PATH
+            string "Startup mix test voice path"
+            depends on APP_STARTUP_MIX_TEST_ENABLE
+            default "/ext/audio/human_voice.mp3"
+            help
+                Voice file path used by the temporary startup mix test.
+
+        config APP_STARTUP_MIX_TEST_FALLBACK_VOICE_PATH
+            string "Startup mix test fallback voice path"
+            depends on APP_STARTUP_MIX_TEST_ENABLE
+            default "/spiffs/human_voice.mp3"
+            help
+                Fallback voice file path used by the temporary startup mix test
+                when the external module voice file is unavailable.
+
     endmenu
 endmenu

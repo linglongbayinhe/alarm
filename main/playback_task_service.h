@@ -49,6 +49,10 @@ typedef struct {
 esp_err_t playback_task_service_init(void);
 esp_err_t playback_task_service_start(EventGroupHandle_t connected_event_group, EventBits_t connected_bit);
 void playback_task_service_request_sync(void);
+esp_err_t playback_task_service_stop_current(void);
+esp_err_t playback_task_service_play_startup_mix_test(const char *voice_path,
+                                                      const char *fallback_voice_path,
+                                                      const char *bgm_path);
 bool playback_task_service_has_pending_pull_result(void);
 
 #endif

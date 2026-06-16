@@ -1,9 +1,13 @@
 #include "button_service.h"
 
+#include <inttypes.h>
+
+#include "app_lifecycle.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "playback_task_service.h"
 
 #define BUTTON_SERVICE_GPIO              GPIO_NUM_13
 #define BUTTON_SERVICE_TASK_STACK_SIZE   3072
@@ -25,17 +29,25 @@ static bool button_service_is_pressed(void)
 
 static void button_service_on_single_click(void)
 {
-    ESP_LOGI(TAG, "关闭闹铃");
+    ESP_LOGI(TAG, "Single click button");
 }
 
 static void button_service_on_double_click(void)
 {
-    ESP_LOGI(TAG, "双击");
+    ESP_LOGI(TAG, "Double click button: stop current alarm playback");
+    esp_err_t ret = playback_task_service_stop_current();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to stop current alarm playback: %s", esp_err_to_name(ret));
+    }
 }
 
-static void button_service_on_long_press(void)
+static void button_service_on_long_press(uint32_t press_ms)
 {
-    ESP_LOGI(TAG, "休眠/关机");
+    ESP_LOGI(TAG, "Long press button: request BLUFI reprovision press_ms=%" PRIu32, press_ms);
+    esp_err_t ret = app_lifecycle_request_reprovision(press_ms);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to request BLUFI reprovision: %s", esp_err_to_name(ret));
+    }
 }
 
 static void button_service_task(void *arg)
@@ -81,7 +93,7 @@ static void button_service_task(void *arg)
         if (stable_pressed) {
             if (!long_press_fired &&
                 ((now - press_start) >= pdMS_TO_TICKS(BUTTON_SERVICE_LONG_PRESS_MS))) {
-                button_service_on_long_press();
+                button_service_on_long_press((uint32_t)((now - press_start) * portTICK_PERIOD_MS));
                 long_press_fired = true;
                 pending_clicks = 0;
             }

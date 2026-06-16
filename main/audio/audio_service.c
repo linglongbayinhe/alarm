@@ -42,6 +42,24 @@ static bool s_i2s_ready;
 static bool s_channel_enabled;
 static uint32_t s_current_sample_rate;
 static bool s_decoder_registered;
+static volatile bool s_stop_requested;
+static volatile bool s_playback_active;
+
+static void audio_service_begin_playback(void)
+{
+    s_stop_requested = false;
+    s_playback_active = true;
+}
+
+static void audio_service_end_playback(void)
+{
+    s_playback_active = false;
+}
+
+static bool audio_service_should_stop(void)
+{
+    return s_stop_requested;
+}
 
 static void audio_service_log_heap(const char *stage)
 {
@@ -349,6 +367,9 @@ static esp_err_t audio_service_write_pcm_16(int16_t *pcm_samples,
             size_t chunk_frames = frame_count - frame_offset;
             size_t frame_index = 0;
 
+            if (audio_service_should_stop()) {
+                return ESP_OK;
+            }
             if (chunk_frames > stereo_chunk_frames) {
                 chunk_frames = stereo_chunk_frames;
             }
@@ -373,6 +394,10 @@ static esp_err_t audio_service_write_pcm_16(int16_t *pcm_samples,
 
     if ((max_frames > 0U) && ((*frames_written + (sample_count / 2U)) > max_frames)) {
         sample_count = (size_t)(max_frames - *frames_written) * 2U;
+    }
+
+    if (audio_service_should_stop()) {
+        return ESP_OK;
     }
 
     *frames_written += sample_count / 2U;
@@ -458,7 +483,7 @@ static esp_err_t audio_service_play_wav(const char *path, uint8_t volume_percent
         max_frames = ((uint64_t)info.sample_rate * (uint64_t)max_duration_ms) / 1000ULL;
     }
 
-    while (bytes_remaining > 0) {
+    while ((bytes_remaining > 0) && !audio_service_should_stop()) {
         size_t chunk_size = bytes_remaining > AUDIO_SERVICE_INPUT_BUFFER_BYTES ?
                             AUDIO_SERVICE_INPUT_BUFFER_BYTES :
                             bytes_remaining;
@@ -583,7 +608,7 @@ static esp_err_t audio_service_play_mp3(const char *path, uint8_t volume_percent
     }
     audio_service_log_heap("mp3_after_decoder_open");
 
-    while (true) {
+    while (!audio_service_should_stop()) {
         size_t read_size = fread(input_buffer, 1, AUDIO_SERVICE_DECODER_INPUT_BYTES, file);
         esp_audio_simple_dec_raw_t raw = {
             .buffer = input_buffer,
@@ -599,7 +624,7 @@ static esp_err_t audio_service_play_mp3(const char *path, uint8_t volume_percent
             break;
         }
 
-        while ((raw.len > 0U) || raw.eos) {
+        while (((raw.len > 0U) || raw.eos) && !audio_service_should_stop()) {
             esp_audio_simple_dec_out_t frame = {
                 .buffer = output_buffer,
                 .len = output_buffer_size,
@@ -1228,7 +1253,7 @@ static int16_t audio_service_mix_sample(int16_t sample_a, bool has_a, int16_t sa
     return (int16_t)mixed;
 }
 
-esp_err_t audio_service_play_mix(const char *path_a, const char *path_b)
+esp_err_t audio_service_play_mix(const char *path_a, const char *path_b, uint8_t volume_percent)
 {
     audio_service_mix_stream_t stream_a = {0};
     audio_service_mix_stream_t stream_b = {0};
@@ -1241,8 +1266,15 @@ esp_err_t audio_service_play_mix(const char *path_a, const char *path_b)
     if (!s_initialized) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (volume_percent > 100U) {
+        volume_percent = 100U;
+    }
 
-    ESP_LOGI(TAG, "Mix playback request: path_a=%s path_b=%s", path_a, path_b);
+    audio_service_begin_playback();
+    ESP_LOGI(TAG, "Mix playback request: path_a=%s path_b=%s volume=%u",
+             path_a,
+             path_b,
+             (unsigned int)volume_percent);
     audio_service_log_heap("mix_before_open");
 
     ret = audio_service_mix_stream_open(&stream_a, path_a);
@@ -1270,7 +1302,7 @@ esp_err_t audio_service_play_mix(const char *path_a, const char *path_b)
     stream_b.output_sample_rate = stream_a.sample_rate;
 
     ESP_LOGI(TAG,
-             "Mix playback start: a=%s format=%s rate=%" PRIu32 " channels=%u b=%s format=%s rate=%" PRIu32 " channels=%u output_rate=%" PRIu32,
+             "Mix playback start: a=%s format=%s rate=%" PRIu32 " channels=%u b=%s format=%s rate=%" PRIu32 " channels=%u output_rate=%" PRIu32 " volume=%u",
              path_a,
              audio_service_format_name(stream_a.format),
              stream_a.sample_rate,
@@ -1279,7 +1311,8 @@ esp_err_t audio_service_play_mix(const char *path_a, const char *path_b)
              audio_service_format_name(stream_b.format),
              stream_b.sample_rate,
              stream_b.channels,
-             stream_a.output_sample_rate);
+             stream_a.output_sample_rate,
+             (unsigned int)volume_percent);
 
     ret = audio_service_ensure_i2s(stream_a.sample_rate);
     if (ret != ESP_OK) {
@@ -1292,7 +1325,7 @@ esp_err_t audio_service_play_mix(const char *path_a, const char *path_b)
         goto cleanup;
     }
 
-    while (true) {
+    while (!audio_service_should_stop()) {
         size_t frame_index = 0;
 
         for (frame_index = 0; frame_index < AUDIO_SERVICE_STEREO_CHUNK_FRAMES; ++frame_index) {
@@ -1303,6 +1336,10 @@ esp_err_t audio_service_play_mix(const char *path_a, const char *path_b)
             bool has_a = false;
             bool has_b = false;
 
+            if (audio_service_should_stop()) {
+                frame_index = 0;
+                break;
+            }
             ret = audio_service_mix_stream_read_output_frame(&stream_a, &left_a, &right_a, &has_a);
             if (ret != ESP_OK) {
                 goto cleanup;
@@ -1323,6 +1360,7 @@ esp_err_t audio_service_play_mix(const char *path_a, const char *path_b)
             break;
         }
 
+        audio_service_scale_buffer(mix_buffer, frame_index * 2U, volume_percent);
         ret = audio_service_write_i2s(mix_buffer, frame_index * 2U * sizeof(*mix_buffer));
         if (ret != ESP_OK) {
             goto cleanup;
@@ -1335,6 +1373,7 @@ cleanup:
     audio_service_mix_stream_close(&stream_a);
     audio_service_finish_output();
     audio_service_log_heap("mix_after_cleanup");
+    audio_service_end_playback();
 
     ESP_LOGI(TAG, "Mix playback end: path_a=%s path_b=%s result=%s", path_a, path_b, esp_err_to_name(ret));
     return ret;
@@ -1363,6 +1402,8 @@ esp_err_t audio_service_play(const char *path,
                              uint8_t volume_percent,
                              uint32_t max_duration_ms)
 {
+    esp_err_t ret = ESP_OK;
+
     if ((path == NULL) || (path[0] == '\0')) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -1385,15 +1426,37 @@ esp_err_t audio_service_play(const char *path,
              volume_percent,
              max_duration_ms);
 
+    audio_service_begin_playback();
     switch (format) {
         case AUDIO_SERVICE_FORMAT_WAV:
-            return audio_service_play_wav(path, volume_percent, max_duration_ms);
+            ret = audio_service_play_wav(path, volume_percent, max_duration_ms);
+            break;
         case AUDIO_SERVICE_FORMAT_MP3:
-            return audio_service_play_mp3(path, volume_percent, max_duration_ms);
+            ret = audio_service_play_mp3(path, volume_percent, max_duration_ms);
+            break;
         case AUDIO_SERVICE_FORMAT_AUTO:
         default:
-            return ESP_ERR_NOT_SUPPORTED;
+            ret = ESP_ERR_NOT_SUPPORTED;
+            break;
     }
+    audio_service_end_playback();
+    return ret;
+}
+
+esp_err_t audio_service_stop(void)
+{
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!s_playback_active) {
+        ESP_LOGI(TAG, "Stop requested with no active playback");
+        return ESP_OK;
+    }
+
+    s_stop_requested = true;
+    ESP_LOGI(TAG, "Stop requested for active playback");
+    return ESP_OK;
 }
 
 bool audio_service_is_ready(void)
