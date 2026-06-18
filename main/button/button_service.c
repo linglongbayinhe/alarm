@@ -29,12 +29,17 @@ static bool button_service_is_pressed(void)
 
 static void button_service_on_single_click(void)
 {
-    ESP_LOGI(TAG, "Single click button");
+    ESP_LOGI(TAG, "Single click: playback click action");
+    esp_err_t ret = playback_task_on_click();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to handle playback click: %s", esp_err_to_name(ret));
+    }
 }
 
 static void button_service_on_double_click(void)
 {
-    ESP_LOGI(TAG, "Double click button: stop current alarm playback");
+    ESP_LOGI(TAG, "Double click: stop current alarm playback");
+    playback_task_service_reset_single_click_count();
     esp_err_t ret = playback_task_service_stop_current();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to stop current alarm playback: %s", esp_err_to_name(ret));
@@ -43,7 +48,8 @@ static void button_service_on_double_click(void)
 
 static void button_service_on_long_press(uint32_t press_ms)
 {
-    ESP_LOGI(TAG, "Long press button: request BLUFI reprovision press_ms=%" PRIu32, press_ms);
+    ESP_LOGI(TAG, "Long press: request BLUFI reprovision press_ms=%" PRIu32, press_ms);
+    playback_task_service_reset_single_click_count();
     esp_err_t ret = app_lifecycle_request_reprovision(press_ms);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to request BLUFI reprovision: %s", esp_err_to_name(ret));
@@ -131,11 +137,11 @@ esp_err_t button_service_init(void)
 
     if (s_task_handle == NULL) {
         BaseType_t created = xTaskCreate(button_service_task,
-                                       "button_svc",
-                                       BUTTON_SERVICE_TASK_STACK_SIZE,
-                                       NULL,
-                                       BUTTON_SERVICE_TASK_PRIORITY,
-                                       &s_task_handle);
+                                         "button_svc",
+                                         BUTTON_SERVICE_TASK_STACK_SIZE,
+                                         NULL,
+                                         BUTTON_SERVICE_TASK_PRIORITY,
+                                         &s_task_handle);
         if (created != pdPASS) {
             ESP_LOGE(TAG, "Failed to create button task");
             return ESP_ERR_NO_MEM;

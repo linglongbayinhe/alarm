@@ -1,6 +1,6 @@
 #ifndef AUDIO_CONFIG_H
 #define AUDIO_CONFIG_H
 
-#define DEFAULT_VOLUME_PERCENT 20
+#define DEFAULT_VOLUME_PERCENT 30
 
 #endif
