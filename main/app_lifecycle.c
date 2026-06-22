@@ -68,8 +68,6 @@ static void app_blufi_cloud_config_changed(void *ctx);
 #define EXAMPLE_UI_TASK_PRIORITY   5
 #define EXAMPLE_RUNTIME_TRANSITION_TASK_STACK_SIZE 4096
 #define EXAMPLE_RUNTIME_TRANSITION_TASK_PRIORITY   4
-#define EXAMPLE_STARTUP_MIX_TEST_TASK_STACK_SIZE 6144
-#define EXAMPLE_STARTUP_MIX_TEST_TASK_PRIORITY   4
 
 /* FreeRTOS event group to signal when we are connected & ready to make a request */
 static EventGroupHandle_t wifi_event_group;
@@ -113,9 +111,6 @@ static app_wifi_state_t s_wifi_state;
 static app_runtime_state_t s_runtime_state;
 static app_provisioning_ui_state_t s_provisioning_ui_state;
 static bool s_display_services_started = false;
-#if CONFIG_APP_STARTUP_MIX_TEST_ENABLE
-static bool s_startup_mix_test_started = false;
-#endif
 
 static void app_log_internal_heap(const char *label)
 {
@@ -398,43 +393,6 @@ static esp_err_t app_start_display_services(const char *reason)
     return ESP_OK;
 }
 
-#if CONFIG_APP_STARTUP_MIX_TEST_ENABLE
-static void app_startup_mix_test_task(void *arg)
-{
-    esp_err_t ret = ESP_OK;
-
-    (void)arg;
-    BLUFI_INFO("Startup mix test task started voice=%s fallback=%s bgm=%s\n",
-               CONFIG_APP_STARTUP_MIX_TEST_VOICE_PATH,
-               CONFIG_APP_STARTUP_MIX_TEST_FALLBACK_VOICE_PATH,
-               CONFIG_APP_STARTUP_MIX_TEST_BGM_PATH);
-    ret = playback_task_service_play_startup_mix_test(CONFIG_APP_STARTUP_MIX_TEST_VOICE_PATH,
-                                                      CONFIG_APP_STARTUP_MIX_TEST_FALLBACK_VOICE_PATH,
-                                                      CONFIG_APP_STARTUP_MIX_TEST_BGM_PATH);
-    if ((ret != ESP_OK) && (ret != ESP_ERR_NOT_FOUND) && (ret != ESP_ERR_INVALID_ARG)) {
-        BLUFI_ERROR("Startup mix test failed: %s\n", esp_err_to_name(ret));
-    }
-    vTaskDelete(NULL);
-}
-
-static void app_startup_mix_test_start_once(void)
-{
-    if (s_startup_mix_test_started) {
-        return;
-    }
-
-    s_startup_mix_test_started = true;
-    if (xTaskCreate(app_startup_mix_test_task,
-                    "startup_mix",
-                    EXAMPLE_STARTUP_MIX_TEST_TASK_STACK_SIZE,
-                    NULL,
-                    EXAMPLE_STARTUP_MIX_TEST_TASK_PRIORITY,
-                    NULL) != pdPASS) {
-        BLUFI_ERROR("Failed to create startup mix test task\n");
-    }
-}
-#endif
-
 static esp_err_t app_start_runtime_services(void)
 {
     esp_err_t ret = ESP_OK;
@@ -460,9 +418,6 @@ static esp_err_t app_start_runtime_services(void)
         }
         s_runtime_state.network_started = true;
         app_log_internal_heap("after_network_start");
-#if CONFIG_APP_STARTUP_MIX_TEST_ENABLE
-        app_startup_mix_test_start_once();
-#endif
     }
 
     if (!s_runtime_state.startup_pull_done) {

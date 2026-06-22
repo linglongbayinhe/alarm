@@ -10,7 +10,6 @@
 #include <time.h>
 
 #include "audio_cache_service.h"
-#include "audio_config.h"
 #include "audio_service.h"
 #include "audio_volume_service.h"
 #include "cJSON.h"
@@ -33,7 +32,7 @@ static const char *PLAYBACK_TASK_BLOB_KEY = "tasks_v1";
 #define PLAYBACK_TASK_BLOB_VERSION               5U
 #define PLAYBACK_TASK_TASK_STACK_SIZE             6144
 #define PLAYBACK_TASK_TASK_PRIORITY               4
-#define PLAYBACK_TASK_HTTP_GRACE_SECONDS          300
+#define PLAYBACK_TASK_HTTP_GRACE_SECONDS          180
 #define PLAYBACK_TASK_KEEP_FILE_SECONDS           (24 * 60 * 60)
 #define PLAYBACK_TASK_NOTIFY_SYNC                 BIT0
 #define PLAYBACK_TASK_NOTIFY_SAVE                 BIT1
@@ -44,8 +43,6 @@ static const char *PLAYBACK_TASK_BLOB_KEY = "tasks_v1";
 #define PLAYBACK_TASK_NETWORK_IDLE_WAIT_MS        2000
 #define PLAYBACK_TASK_DEFAULT_VOICE               "gentle"
 #define PLAYBACK_TASK_SNOOZE_SECONDS              20
-#define PLAYBACK_TASK_STARTUP_SNOOZE_STACK_SIZE   4096
-#define PLAYBACK_TASK_STARTUP_SNOOZE_PRIORITY     4
 
 typedef struct {
     uint32_t magic;
@@ -66,13 +63,13 @@ typedef struct {
 typedef enum {
     PLAYBACK_CLICK_ACTION_NONE = 0,
     PLAYBACK_CLICK_ACTION_SNOOZE,
-    PLAYBACK_CLICK_ACTION_CLOSE,
+    PLAYBACK_CLICK_ACTION_STOP,
 } playback_click_action_t;
 
 typedef enum {
     PLAYBACK_CONTEXT_NONE = 0,
     PLAYBACK_CONTEXT_ALARM_MIX,
-    PLAYBACK_CONTEXT_STARTUP_MIX_TEST,
+    PLAYBACK_CONTEXT_ALARM_DEFAULT,
 } playback_context_t;
 
 static playback_task_t s_tasks[PLAYBACK_TASK_MAX_COUNT];
@@ -98,10 +95,8 @@ static portMUX_TYPE s_playback_control_lock = portMUX_INITIALIZER_UNLOCKED;
 static playback_context_t s_current_playback_context;
 static playback_click_action_t s_current_click_action;
 static uint8_t s_single_click_count;
-static bool s_startup_mix_snooze_pending;
-static char s_startup_mix_snooze_voice_path[AUDIO_CACHE_PATH_MAX];
-static char s_startup_mix_snooze_fallback_voice_path[AUDIO_CACHE_PATH_MAX];
-static char s_startup_mix_snooze_bgm_path[AUDIO_CACHE_PATH_MAX];
+static char s_alarm_repeat_instance_id[PLAYBACK_TASK_ID_SIZE];
+static uint32_t s_alarm_repeat_play_count;
 
 static void playback_task_mark_dirty(bool immediate);
 static void playback_task_flush_state_if_dirty(void);
@@ -206,9 +201,61 @@ static playback_click_action_t playback_task_end_current_playback(playback_conte
     return action;
 }
 
+static playback_click_action_t playback_task_get_current_click_action(playback_context_t context)
+{
+    playback_click_action_t action = PLAYBACK_CLICK_ACTION_NONE;
+
+    taskENTER_CRITICAL(&s_playback_control_lock);
+    if (s_current_playback_context == context) {
+        action = s_current_click_action;
+    }
+    taskEXIT_CRITICAL(&s_playback_control_lock);
+
+    return action;
+}
+
+static bool playback_task_set_current_click_action(playback_click_action_t action)
+{
+    bool has_playback = false;
+
+    taskENTER_CRITICAL(&s_playback_control_lock);
+    if ((s_current_playing_path[0] != '\0') &&
+        (s_current_playback_context != PLAYBACK_CONTEXT_NONE)) {
+        s_current_click_action = action;
+        has_playback = true;
+    }
+    taskEXIT_CRITICAL(&s_playback_control_lock);
+
+    return has_playback;
+}
+
 static void playback_task_reset_single_click_count_locked(void)
 {
     s_single_click_count = 0;
+}
+
+static void playback_task_reset_alarm_repeat_state(void)
+{
+    s_alarm_repeat_instance_id[0] = '\0';
+    s_alarm_repeat_play_count = 0;
+}
+
+static uint32_t playback_task_next_alarm_repeat_count(const playback_task_t *task)
+{
+    if ((task == NULL) || (task->instance_id[0] == '\0')) {
+        playback_task_reset_alarm_repeat_state();
+        return 1;
+    }
+
+    if (strcmp(s_alarm_repeat_instance_id, task->instance_id) != 0) {
+        playback_task_copy_string(s_alarm_repeat_instance_id,
+                                  sizeof(s_alarm_repeat_instance_id),
+                                  task->instance_id);
+        s_alarm_repeat_play_count = 0;
+    }
+
+    ++s_alarm_repeat_play_count;
+    return s_alarm_repeat_play_count;
 }
 
 static void playback_task_copy_current_playing_path(char *path_buffer, size_t path_buffer_size)
@@ -234,76 +281,6 @@ static void playback_task_mark_snoozed(playback_task_t *task)
              task->instance_id,
              (unsigned int)PLAYBACK_TASK_SNOOZE_SECONDS,
              task->ring_at_epoch);
-}
-
-static void playback_task_startup_mix_snooze_task(void *arg)
-{
-    char voice_path[AUDIO_CACHE_PATH_MAX] = {0};
-    char fallback_voice_path[AUDIO_CACHE_PATH_MAX] = {0};
-    char bgm_path[AUDIO_CACHE_PATH_MAX] = {0};
-
-    (void)arg;
-
-    vTaskDelay(pdMS_TO_TICKS(PLAYBACK_TASK_SNOOZE_SECONDS * 1000U));
-
-    taskENTER_CRITICAL(&s_playback_control_lock);
-    playback_task_copy_string_locked(voice_path, sizeof(voice_path), s_startup_mix_snooze_voice_path);
-    playback_task_copy_string_locked(fallback_voice_path,
-                                     sizeof(fallback_voice_path),
-                                     s_startup_mix_snooze_fallback_voice_path);
-    playback_task_copy_string_locked(bgm_path, sizeof(bgm_path), s_startup_mix_snooze_bgm_path);
-    s_startup_mix_snooze_pending = false;
-    taskEXIT_CRITICAL(&s_playback_control_lock);
-
-    ESP_LOGI(TAG,
-             "Startup mix test snooze replay: delaySeconds=%u",
-             (unsigned int)PLAYBACK_TASK_SNOOZE_SECONDS);
-    (void)playback_task_service_play_startup_mix_test(voice_path, fallback_voice_path, bgm_path);
-    vTaskDelete(NULL);
-}
-
-static esp_err_t playback_task_schedule_startup_mix_snooze(const char *voice_path,
-                                                           const char *fallback_voice_path,
-                                                           const char *bgm_path)
-{
-    BaseType_t created;
-
-    taskENTER_CRITICAL(&s_playback_control_lock);
-    if (s_startup_mix_snooze_pending) {
-        taskEXIT_CRITICAL(&s_playback_control_lock);
-        ESP_LOGW(TAG, "Startup mix test snooze already pending");
-        return ESP_OK;
-    }
-    playback_task_copy_string_locked(s_startup_mix_snooze_voice_path,
-                                     sizeof(s_startup_mix_snooze_voice_path),
-                                     voice_path);
-    playback_task_copy_string_locked(s_startup_mix_snooze_fallback_voice_path,
-                                     sizeof(s_startup_mix_snooze_fallback_voice_path),
-                                     fallback_voice_path);
-    playback_task_copy_string_locked(s_startup_mix_snooze_bgm_path,
-                                     sizeof(s_startup_mix_snooze_bgm_path),
-                                     bgm_path);
-    s_startup_mix_snooze_pending = true;
-    taskEXIT_CRITICAL(&s_playback_control_lock);
-
-    created = xTaskCreate(playback_task_startup_mix_snooze_task,
-                          "startup_mix_snooze",
-                          PLAYBACK_TASK_STARTUP_SNOOZE_STACK_SIZE,
-                          NULL,
-                          PLAYBACK_TASK_STARTUP_SNOOZE_PRIORITY,
-                          NULL);
-    if (created != pdPASS) {
-        taskENTER_CRITICAL(&s_playback_control_lock);
-        s_startup_mix_snooze_pending = false;
-        taskEXIT_CRITICAL(&s_playback_control_lock);
-        ESP_LOGE(TAG, "Failed to create startup mix test snooze task");
-        return ESP_ERR_NO_MEM;
-    }
-
-    ESP_LOGI(TAG,
-             "Startup mix test snoozed: delaySeconds=%u",
-             (unsigned int)PLAYBACK_TASK_SNOOZE_SECONDS);
-    return ESP_OK;
 }
 
 static esp_err_t playback_task_build_bgm_path(const playback_task_t *task,
@@ -836,27 +813,67 @@ static void playback_task_log_skip_remote_task(const playback_task_t *task,
 static void playback_task_merge_cached_fields(playback_task_t *new_task, const playback_task_t *existing_task)
 {
     bool same_ring_at = false;
-    bool same_audio = false;
+    bool reusable_cached_audio = false;
+    bool preserve_local_schedule = false;
+    bool keep_terminal_state = false;
 
     if ((new_task == NULL) || (existing_task == NULL)) {
         return;
     }
 
     same_ring_at = (new_task->ring_at_epoch == existing_task->ring_at_epoch);
-    same_audio = (new_task->audio_download_url[0] != '\0') &&
-                 (strcmp(new_task->audio_download_url, existing_task->audio_download_url) == 0);
+    keep_terminal_state = (existing_task->task_status == PLAYBACK_TASK_STATUS_FINISHED) ||
+                          (existing_task->task_status == PLAYBACK_TASK_STATUS_FAILED);
+    preserve_local_schedule = (existing_task->ring_at_epoch > new_task->ring_at_epoch) &&
+                              !keep_terminal_state;
+    reusable_cached_audio = (existing_task->local_path[0] != '\0') &&
+                            audio_cache_service_file_exists(existing_task->local_path);
 
-    if (!same_ring_at) {
+    if (keep_terminal_state) {
+        ESP_LOGI(TAG,
+                 "Keeping local terminal playback state for instance=%s local=%s remote=%s",
+                 new_task->instance_id,
+                 playback_task_status_to_string((playback_task_status_t)existing_task->task_status),
+                 playback_task_status_to_string((playback_task_status_t)new_task->task_status));
+        new_task->ring_at_epoch = existing_task->ring_at_epoch;
+        new_task->expires_at_epoch = existing_task->expires_at_epoch;
+        new_task->task_status = existing_task->task_status;
+        new_task->audio_hash = existing_task->audio_hash;
+        if (existing_task->audio_id[0] != '\0') {
+            playback_task_copy_string(new_task->audio_id, sizeof(new_task->audio_id), existing_task->audio_id);
+        }
+        if (existing_task->local_path[0] != '\0') {
+            playback_task_copy_string(new_task->local_path, sizeof(new_task->local_path), existing_task->local_path);
+        }
+        new_task->audio_status = existing_task->audio_status;
+    } else if (preserve_local_schedule) {
+        ESP_LOGI(TAG,
+                 "Preserving local playback schedule for instance=%s localRingAt=%" PRId64 " remoteRingAt=%" PRId64,
+                 new_task->instance_id,
+                 existing_task->ring_at_epoch,
+                 new_task->ring_at_epoch);
+        new_task->ring_at_epoch = existing_task->ring_at_epoch;
+        new_task->expires_at_epoch = existing_task->expires_at_epoch;
+        new_task->task_status = existing_task->task_status;
+    } else if (!same_ring_at) {
         ESP_LOGI(TAG,
                  "Remote playback task reused instanceId=%s with changed ringAt; treating as new local schedule",
                  new_task->instance_id);
     }
 
-    if (same_audio) {
+    if (!keep_terminal_state && reusable_cached_audio) {
         new_task->audio_hash = existing_task->audio_hash;
-        playback_task_copy_string(new_task->audio_id, sizeof(new_task->audio_id), existing_task->audio_id);
+        if (existing_task->audio_id[0] != '\0') {
+            playback_task_copy_string(new_task->audio_id, sizeof(new_task->audio_id), existing_task->audio_id);
+        } else {
+            playback_task_copy_string(new_task->audio_id, sizeof(new_task->audio_id), new_task->instance_id);
+        }
         playback_task_copy_string(new_task->local_path, sizeof(new_task->local_path), existing_task->local_path);
-        new_task->audio_status = existing_task->audio_status;
+        new_task->audio_status = PLAYBACK_AUDIO_STATUS_CACHED;
+        ESP_LOGI(TAG,
+                 "Reusing cached playback audio for instance=%s path=%s",
+                 new_task->instance_id,
+                 new_task->local_path);
     }
 
     if (same_ring_at) {
@@ -1120,6 +1137,9 @@ static esp_err_t playback_task_apply_cloud_response(const char *json,
         if ((cache_items != NULL) &&
             (cache_item_count != NULL) &&
             (*cache_item_count < cache_item_capacity) &&
+            (parsed_task.task_status != PLAYBACK_TASK_STATUS_FINISHED) &&
+            (parsed_task.task_status != PLAYBACK_TASK_STATUS_FAILED) &&
+            (parsed_task.audio_status != PLAYBACK_AUDIO_STATUS_CACHED) &&
             cJSON_IsString(audio_download_url) &&
             (audio_download_url->valuestring != NULL) &&
             (audio_download_url->valuestring[0] != '\0')) {
@@ -1141,6 +1161,14 @@ static esp_err_t playback_task_apply_cloud_response(const char *json,
                      parsed_task.instance_id,
                      parsed_task.audio_download_url);
             ++(*cache_item_count);
+        } else if (cJSON_IsString(audio_download_url) &&
+                   (audio_download_url->valuestring != NULL) &&
+                   (audio_download_url->valuestring[0] != '\0') &&
+                   (parsed_task.audio_status == PLAYBACK_AUDIO_STATUS_CACHED)) {
+            ESP_LOGI(TAG,
+                     "Skip audio download for cached instance=%s path=%s",
+                     parsed_task.instance_id,
+                     parsed_task.local_path);
         }
         new_tasks[new_task_count++] = parsed_task;
     }
@@ -1216,6 +1244,9 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
     char bgm_path[AUDIO_CACHE_PATH_MAX] = {0};
     audio_service_format_t format = AUDIO_SERVICE_FORMAT_AUTO;
     bool using_cached_audio = false;
+    bool force_default_alarm = false;
+    bool natural_repeat_pending = false;
+    uint32_t alarm_play_count = 0;
     uint8_t volume_percent = audio_volume_service_get_current_percent();
     playback_click_action_t click_action = PLAYBACK_CLICK_ACTION_NONE;
     esp_err_t ret = ESP_OK;
@@ -1223,6 +1254,13 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
     if (task == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    if ((s_alarm_repeat_instance_id[0] != '\0') &&
+        (strcmp(s_alarm_repeat_instance_id, task->instance_id) != 0)) {
+        playback_task_reset_alarm_repeat_state();
+    }
+    alarm_play_count = s_alarm_repeat_play_count + 1U;
+    force_default_alarm = (alarm_play_count >= 3U);
 
     if (playback_task_find_cached_audio(task, cached_path, sizeof(cached_path))) {
         play_path = cached_path;
@@ -1232,6 +1270,16 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
                  play_path,
                  task->voice[0] == '\0' ? PLAYBACK_TASK_DEFAULT_VOICE : task->voice,
                  (unsigned int)volume_percent);
+    } else if (!force_default_alarm &&
+               (task->audio_download_url[0] != '\0') &&
+               ((task->audio_status == PLAYBACK_AUDIO_STATUS_WAITING) ||
+                (task->audio_status == PLAYBACK_AUDIO_STATUS_NONE))) {
+        ESP_LOGI(TAG,
+                 "Alarm voice cache not ready; retrying before counting repeat: instanceId=%s audioStatus=%s",
+                 task->instance_id,
+                 playback_audio_status_to_string((playback_audio_status_t)task->audio_status));
+        playback_task_mark_snoozed(task);
+        return ESP_OK;
     } else if (playback_task_allows_fallback(task) && storage_service_default_audio_exists()) {
         play_path = storage_service_get_default_audio_path();
         format = AUDIO_SERVICE_FORMAT_AUTO;
@@ -1254,19 +1302,66 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
         task->task_status = PLAYBACK_TASK_STATUS_FAILED;
         task->audio_status = PLAYBACK_AUDIO_STATUS_FAILED;
         task->expires_at_epoch = time(NULL) + PLAYBACK_TASK_KEEP_FILE_SECONDS;
+        playback_task_enqueue_report_status(task, PLAYBACK_TASK_STATUS_FAILED);
         playback_task_mark_dirty(true);
         ESP_LOGW(TAG, "Playback failed locally for %s: no playable audio (Failed: with no audio)", task->instance_id);
         return ESP_ERR_NOT_FOUND;
     }
 
+    if (force_default_alarm) {
+        if (!storage_service_default_audio_exists()) {
+            ESP_LOGW(TAG,
+                     "Default alarm missing for repeat %u: defaultPath=%s",
+                     (unsigned int)alarm_play_count,
+                     storage_service_get_default_audio_path());
+            task->task_status = PLAYBACK_TASK_STATUS_FAILED;
+            task->audio_status = PLAYBACK_AUDIO_STATUS_FAILED;
+            task->expires_at_epoch = time(NULL) + PLAYBACK_TASK_KEEP_FILE_SECONDS;
+            playback_task_reset_alarm_repeat_state();
+            playback_task_enqueue_report_status(task, PLAYBACK_TASK_STATUS_FAILED);
+            playback_task_mark_dirty(true);
+            return ESP_ERR_NOT_FOUND;
+        }
+        play_path = storage_service_get_default_audio_path();
+        using_cached_audio = false;
+        format = AUDIO_SERVICE_FORMAT_AUTO;
+    }
+    if (using_cached_audio || force_default_alarm) {
+        alarm_play_count = playback_task_next_alarm_repeat_count(task);
+    }
+
+    ESP_LOGI(TAG,
+             "Alarm local playback: instanceId=%s repeat=%u mode=%s path=%s",
+             task->instance_id,
+             (unsigned int)alarm_play_count,
+             force_default_alarm ? "default_alarm" : "mix",
+             play_path);
+
     task->task_status = PLAYBACK_TASK_STATUS_PLAYING;
 
+    playback_task_set_current_playback(force_default_alarm ? PLAYBACK_CONTEXT_ALARM_DEFAULT :
+                                                           PLAYBACK_CONTEXT_ALARM_MIX,
+                                       play_path);
     network_task_service_set_https_suspended(true);
     network_task_service_reset_sessions();
     (void)network_task_service_wait_idle(PLAYBACK_TASK_NETWORK_IDLE_WAIT_MS);
 
-    playback_task_set_current_playback(PLAYBACK_CONTEXT_NONE, play_path);
-    if (using_cached_audio) {
+    click_action = playback_task_get_current_click_action(force_default_alarm ? PLAYBACK_CONTEXT_ALARM_DEFAULT :
+                                                                              PLAYBACK_CONTEXT_ALARM_MIX);
+    if (click_action != PLAYBACK_CLICK_ACTION_NONE) {
+        click_action = playback_task_end_current_playback(force_default_alarm ? PLAYBACK_CONTEXT_ALARM_DEFAULT :
+                                                                              PLAYBACK_CONTEXT_ALARM_MIX);
+        ret = ESP_OK;
+    } else if (force_default_alarm) {
+        ESP_LOGI(TAG,
+                 "Playback default alarm source: instanceId=%s repeat=%u path=%s volume=%u",
+                 task->instance_id,
+                 (unsigned int)alarm_play_count,
+                 play_path,
+                 (unsigned int)volume_percent);
+        ret = audio_service_play(play_path, format, volume_percent, 0);
+        click_action = playback_task_end_current_playback(PLAYBACK_CONTEXT_ALARM_DEFAULT);
+    } else if (using_cached_audio) {
         ret = playback_task_build_bgm_path(task, bgm_path, sizeof(bgm_path));
         if (ret == ESP_OK) {
             if (playback_task_file_exists(bgm_path)) {
@@ -1276,7 +1371,6 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
                          play_path,
                          bgm_path,
                          (unsigned int)volume_percent);
-                playback_task_set_current_playback(PLAYBACK_CONTEXT_ALARM_MIX, play_path);
                 ret = audio_service_play_mix(play_path, bgm_path, volume_percent);
                 click_action = playback_task_end_current_playback(PLAYBACK_CONTEXT_ALARM_MIX);
                 if ((click_action == PLAYBACK_CLICK_ACTION_NONE) && (ret != ESP_OK)) {
@@ -1285,9 +1379,9 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
                              task->instance_id,
                              bgm_path,
                              esp_err_to_name(ret));
-                    playback_task_set_current_playback(PLAYBACK_CONTEXT_NONE, play_path);
+                    playback_task_set_current_playback(PLAYBACK_CONTEXT_ALARM_MIX, play_path);
                     ret = audio_service_play(play_path, format, volume_percent, 0);
-                    click_action = playback_task_end_current_playback(PLAYBACK_CONTEXT_NONE);
+                    click_action = playback_task_end_current_playback(PLAYBACK_CONTEXT_ALARM_MIX);
                 }
             } else {
                 ESP_LOGW(TAG,
@@ -1295,7 +1389,7 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
                          task->instance_id,
                          bgm_path);
                 ret = audio_service_play(play_path, format, volume_percent, 0);
-                click_action = playback_task_end_current_playback(PLAYBACK_CONTEXT_NONE);
+                click_action = playback_task_end_current_playback(PLAYBACK_CONTEXT_ALARM_MIX);
             }
         } else {
             ESP_LOGW(TAG,
@@ -1303,11 +1397,11 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
                      task->instance_id,
                      esp_err_to_name(ret));
             ret = audio_service_play(play_path, format, volume_percent, 0);
-            click_action = playback_task_end_current_playback(PLAYBACK_CONTEXT_NONE);
+            click_action = playback_task_end_current_playback(PLAYBACK_CONTEXT_ALARM_MIX);
         }
     } else {
         ret = audio_service_play(play_path, format, volume_percent, 0);
-        click_action = playback_task_end_current_playback(PLAYBACK_CONTEXT_NONE);
+        click_action = playback_task_end_current_playback(PLAYBACK_CONTEXT_ALARM_MIX);
     }
     if ((click_action == PLAYBACK_CLICK_ACTION_NONE) &&
         (ret != ESP_OK) &&
@@ -1316,13 +1410,13 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
         storage_service_default_audio_exists() &&
         (strcmp(play_path, storage_service_get_default_audio_path()) != 0)) {
         task->audio_status = PLAYBACK_AUDIO_STATUS_FAILED;
-        playback_task_set_current_playback(PLAYBACK_CONTEXT_NONE,
+        playback_task_set_current_playback(PLAYBACK_CONTEXT_ALARM_DEFAULT,
                                            storage_service_get_default_audio_path());
         ret = audio_service_play(storage_service_get_default_audio_path(),
                                  AUDIO_SERVICE_FORMAT_AUTO,
                                  volume_percent,
                                  0);
-        click_action = playback_task_end_current_playback(PLAYBACK_CONTEXT_NONE);
+        click_action = playback_task_end_current_playback(PLAYBACK_CONTEXT_ALARM_DEFAULT);
     }
     network_task_service_set_https_suspended(false);
 
@@ -1331,9 +1425,23 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
         return ESP_OK;
     }
 
-    if (click_action == PLAYBACK_CLICK_ACTION_CLOSE) {
+    natural_repeat_pending = (click_action == PLAYBACK_CLICK_ACTION_NONE) &&
+                             (ret == ESP_OK) &&
+                             (using_cached_audio || force_default_alarm) &&
+                             (alarm_play_count < 3U);
+    if (natural_repeat_pending) {
+        ESP_LOGI(TAG,
+                 "Alarm repeat scheduled after natural playback: instanceId=%s repeat=%u nextRepeat=%u",
+                 task->instance_id,
+                 (unsigned int)alarm_play_count,
+                 (unsigned int)(alarm_play_count + 1U));
+        playback_task_mark_snoozed(task);
+        return ESP_OK;
+    }
+
+    if (click_action == PLAYBACK_CLICK_ACTION_STOP) {
         task->task_status = PLAYBACK_TASK_STATUS_FINISHED;
-        ESP_LOGI(TAG, "Alarm closed by third single click: instanceId=%s", task->instance_id);
+        ESP_LOGI(TAG, "Alarm stopped by non-snooze button action: instanceId=%s", task->instance_id);
     } else if (ret == ESP_OK) {
         task->task_status = PLAYBACK_TASK_STATUS_FINISHED;
     } else {
@@ -1342,8 +1450,14 @@ static esp_err_t playback_task_play_now(playback_task_t *task)
     }
 
     playback_task_service_reset_single_click_count();
+    playback_task_reset_alarm_repeat_state();
 
     task->expires_at_epoch = time(NULL) + PLAYBACK_TASK_KEEP_FILE_SECONDS;
+    if (task->task_status == PLAYBACK_TASK_STATUS_FINISHED) {
+        playback_task_enqueue_report_status(task, PLAYBACK_TASK_STATUS_FINISHED);
+    } else if (task->task_status == PLAYBACK_TASK_STATUS_FAILED) {
+        playback_task_enqueue_report_status(task, PLAYBACK_TASK_STATUS_FAILED);
+    }
     playback_task_mark_dirty(true);
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "Playback finished locally for %s (Success)", task->instance_id);
@@ -1988,26 +2102,14 @@ esp_err_t playback_task_on_click(void)
 
     ++s_single_click_count;
     click_count = s_single_click_count;
-    if (s_single_click_count < 3U) {
-        action = PLAYBACK_CLICK_ACTION_SNOOZE;
-    } else {
-        action = PLAYBACK_CLICK_ACTION_CLOSE;
-        playback_task_reset_single_click_count_locked();
-    }
+    action = PLAYBACK_CLICK_ACTION_SNOOZE;
     s_current_click_action = action;
     taskEXIT_CRITICAL(&s_playback_control_lock);
 
-    if (action == PLAYBACK_CLICK_ACTION_SNOOZE) {
-        ESP_LOGI(TAG,
-                 "Single click snooze requested: count=%u path=%s",
-                 (unsigned int)click_count,
-                 playing_path);
-    } else {
-        ESP_LOGI(TAG,
-                 "Single click close requested: count=%u path=%s",
-                 (unsigned int)click_count,
-                 playing_path);
-    }
+    ESP_LOGI(TAG,
+             "Single click snooze requested: count=%u path=%s",
+             (unsigned int)click_count,
+             playing_path);
 
     return audio_service_stop();
 }
@@ -2023,98 +2125,7 @@ esp_err_t playback_task_service_stop_current(void)
         return ESP_OK;
     }
 
+    (void)playback_task_set_current_click_action(PLAYBACK_CLICK_ACTION_STOP);
     ESP_LOGI(TAG, "Stop requested for current playback task path=%s", playing_path);
     return audio_service_stop();
-}
-
-esp_err_t playback_task_service_play_startup_mix_test(const char *voice_path,
-                                                      const char *fallback_voice_path,
-                                                      const char *bgm_path)
-{
-    const char *selected_voice_path = voice_path;
-    uint8_t previous_volume = audio_volume_service_get_current_percent();
-    playback_click_action_t click_action = PLAYBACK_CLICK_ACTION_NONE;
-    bool https_suspended = false;
-    bool volume_changed = false;
-    esp_err_t ret = ESP_OK;
-
-    ESP_LOGI(TAG, "============test: playback_task_service_play_startup_mix_test=============");
-    if ((voice_path == NULL) || (voice_path[0] == '\0') ||
-        (bgm_path == NULL) || (bgm_path[0] == '\0')) {
-        ESP_LOGW(TAG, "Startup mix test skipped: invalid path voice=%s fallback=%s bgm=%s",
-                 voice_path == NULL ? "" : voice_path,
-                 fallback_voice_path == NULL ? "" : fallback_voice_path,
-                 bgm_path == NULL ? "" : bgm_path);
-        ret = ESP_ERR_INVALID_ARG;
-        goto cleanup;
-    }
-    if (!playback_task_file_exists(voice_path)) {
-        if ((fallback_voice_path != NULL) &&
-            (fallback_voice_path[0] != '\0') &&
-            playback_task_file_exists(fallback_voice_path)) {
-            selected_voice_path = fallback_voice_path;
-            ESP_LOGW(TAG,
-                     "Startup mix test voice missing path=%s; using fallback=%s",
-                     voice_path,
-                     fallback_voice_path);
-        } else {
-            ESP_LOGW(TAG,
-                     "Startup mix test skipped: voice file missing path=%s fallback=%s",
-                     voice_path,
-                     fallback_voice_path == NULL ? "" : fallback_voice_path);
-            ret = ESP_ERR_NOT_FOUND;
-            goto cleanup;
-        }
-    }
-    if (!playback_task_file_exists(bgm_path)) {
-        ESP_LOGW(TAG, "Startup mix test skipped: BGM file missing path=%s", bgm_path);
-        ret = ESP_ERR_NOT_FOUND;
-        goto cleanup;
-    }
-
-    audio_volume_service_set_current_percent(DEFAULT_VOLUME_PERCENT);
-    volume_changed = true;
-    ESP_LOGI(TAG,
-             "Startup mix test volume set to %u%%",
-             (unsigned int)audio_volume_service_get_current_percent());
-    ESP_LOGI(TAG,
-             "Startup mix test start: voice=%s bgm=%s volume=%u",
-             selected_voice_path,
-             bgm_path,
-             (unsigned int)audio_volume_service_get_current_percent());
-    network_task_service_set_https_suspended(true);
-    https_suspended = true;
-    playback_task_set_current_playback(PLAYBACK_CONTEXT_STARTUP_MIX_TEST, selected_voice_path);
-    ret = audio_service_play_mix(selected_voice_path,
-                                 bgm_path,
-                                 audio_volume_service_get_current_percent());
-    click_action = playback_task_end_current_playback(PLAYBACK_CONTEXT_STARTUP_MIX_TEST);
-    if (https_suspended) {
-        network_task_service_set_https_suspended(false);
-        https_suspended = false;
-    }
-    if (volume_changed) {
-        audio_volume_service_set_current_percent(previous_volume);
-        volume_changed = false;
-    }
-    if (click_action == PLAYBACK_CLICK_ACTION_SNOOZE) {
-        (void)playback_task_schedule_startup_mix_snooze(voice_path, fallback_voice_path, bgm_path);
-    } else if (click_action == PLAYBACK_CLICK_ACTION_CLOSE) {
-        ESP_LOGI(TAG, "Startup mix test closed by third single click");
-    } else {
-        playback_task_service_reset_single_click_count();
-    }
-
-cleanup:
-    if (https_suspended) {
-        network_task_service_set_https_suspended(false);
-    }
-    if (volume_changed) {
-        audio_volume_service_set_current_percent(previous_volume);
-    }
-    ESP_LOGI(TAG, "Startup mix test end: voice=%s bgm=%s result=%s",
-             selected_voice_path == NULL ? "" : selected_voice_path,
-             bgm_path == NULL ? "" : bgm_path,
-             esp_err_to_name(ret));
-    return ret;
 }
