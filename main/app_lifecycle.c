@@ -68,6 +68,7 @@ static void app_blufi_cloud_config_changed(void *ctx);
 #define EXAMPLE_UI_TASK_PRIORITY   5
 #define EXAMPLE_RUNTIME_TRANSITION_TASK_STACK_SIZE 4096
 #define EXAMPLE_RUNTIME_TRANSITION_TASK_PRIORITY   4
+#define EXAMPLE_EXPRESSION_IDLE_MS 20000
 
 /* FreeRTOS event group to signal when we are connected & ready to make a request */
 static EventGroupHandle_t wifi_event_group;
@@ -111,6 +112,10 @@ static app_wifi_state_t s_wifi_state;
 static app_runtime_state_t s_runtime_state;
 static app_provisioning_ui_state_t s_provisioning_ui_state;
 static bool s_display_services_started = false;
+static bool s_expression_idle_ready = false;
+static TickType_t s_expression_ready_tick = 0;
+static TickType_t s_last_button_activity_tick = 0;
+static portMUX_TYPE s_expression_state_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static void app_log_internal_heap(const char *label)
 {
@@ -297,6 +302,49 @@ static void app_prepare_provisioning_qr_payload(void)
     }
 }
 
+void app_lifecycle_notify_button_activity(void)
+{
+    TickType_t now = xTaskGetTickCount();
+
+    taskENTER_CRITICAL(&s_expression_state_lock);
+    s_last_button_activity_tick = now;
+    taskEXIT_CRITICAL(&s_expression_state_lock);
+}
+
+static void app_apply_expression_page(display_view_model_t *view_model)
+{
+    TickType_t now;
+    TickType_t latest_activity;
+    TickType_t ready_tick;
+    bool idle_ready;
+
+    if (view_model == NULL) {
+        return;
+    }
+
+    view_model->page = DISPLAY_PAGE_STATUS;
+    view_model->expression = DISPLAY_EXPRESSION_SLEEPY;
+
+    taskENTER_CRITICAL(&s_expression_state_lock);
+    idle_ready = s_expression_idle_ready;
+    ready_tick = s_expression_ready_tick;
+    latest_activity = s_last_button_activity_tick;
+    taskEXIT_CRITICAL(&s_expression_state_lock);
+
+    if (!idle_ready) {
+        return;
+    }
+
+    now = xTaskGetTickCount();
+    if ((int32_t)(ready_tick - latest_activity) > 0) {
+        latest_activity = ready_tick;
+    }
+
+    if ((now - latest_activity) >= pdMS_TO_TICKS(EXAMPLE_EXPRESSION_IDLE_MS)) {
+        view_model->page = DISPLAY_PAGE_EXPRESSION;
+    }
+}
+
 static esp_err_t app_set_force_blufi_once(void)
 {
     nvs_handle_t handle = 0;
@@ -454,6 +502,11 @@ static esp_err_t app_start_runtime_services(void)
     app_log_internal_heap("after_weather_start");
 
     s_runtime_state.services_started = true;
+    taskENTER_CRITICAL(&s_expression_state_lock);
+    s_expression_ready_tick = xTaskGetTickCount();
+    s_last_button_activity_tick = s_expression_ready_tick;
+    s_expression_idle_ready = true;
+    taskEXIT_CRITICAL(&s_expression_state_lock);
     return ESP_OK;
 }
 
@@ -571,6 +624,7 @@ static void app_ui_task(void *arg)
             continue;
         }
 
+        app_apply_expression_page(&view_model);
         app_apply_provisioning_view(&view_model);
         ret = display_service_render(&view_model);
         if (ret != ESP_OK) {

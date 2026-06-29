@@ -29,6 +29,7 @@ static bool button_service_is_pressed(void)
 
 static void button_service_on_single_click(void)
 {
+    app_lifecycle_notify_button_activity();
     ESP_LOGI(TAG, "Single click: playback click action");
     esp_err_t ret = playback_task_on_click();
     if (ret != ESP_OK) {
@@ -38,6 +39,7 @@ static void button_service_on_single_click(void)
 
 static void button_service_on_double_click(void)
 {
+    app_lifecycle_notify_button_activity();
     ESP_LOGI(TAG, "Double click: stop current alarm playback");
     playback_task_service_reset_single_click_count();
     esp_err_t ret = playback_task_service_stop_current();
@@ -48,6 +50,7 @@ static void button_service_on_double_click(void)
 
 static void button_service_on_long_press(uint32_t press_ms)
 {
+    app_lifecycle_notify_button_activity();
     ESP_LOGI(TAG, "Long press: request BLUFI reprovision press_ms=%" PRIu32, press_ms);
     playback_task_service_reset_single_click_count();
     esp_err_t ret = app_lifecycle_request_reprovision(press_ms);
@@ -82,6 +85,7 @@ static void button_service_task(void *arg)
                 stable_pressed = candidate_pressed;
 
                 if (stable_pressed) {
+                    app_lifecycle_notify_button_activity();
                     press_start = now;
                     long_press_fired = false;
                 } else if (!long_press_fired) {

@@ -1,0 +1,893 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Expression Mouth Editor</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Arial, sans-serif;
+      background: #1b1b1b;
+      color: #f2f2f2;
+    }
+    body {
+      margin: 0;
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 20px;
+      padding: 20px;
+    }
+    h2 {
+      margin: 0 0 12px;
+      font-size: 20px;
+    }
+    canvas {
+      background: #000;
+      image-rendering: pixelated;
+      border: 1px solid #555;
+      width: 640px;
+      height: 480px;
+      outline: none;
+      cursor: crosshair;
+    }
+    label, select, button, textarea, input {
+      display: block;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    label {
+      margin: 8px 0;
+      font-size: 13px;
+      color: #d8d8d8;
+    }
+    input, select, button {
+      margin-top: 4px;
+      padding: 7px;
+      border: 1px solid #555;
+      background: #101010;
+      color: #f2f2f2;
+    }
+    button {
+      cursor: pointer;
+      background: #2b2b2b;
+    }
+    textarea {
+      height: 170px;
+      margin-top: 10px;
+      font-family: Consolas, monospace;
+      font-size: 12px;
+      background: #101010;
+      color: #e8e8e8;
+      border: 1px solid #555;
+      padding: 8px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      margin: 8px 0;
+    }
+    .row button {
+      margin-top: 0;
+    }
+    .checkrow {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 8px 0;
+      font-size: 13px;
+      color: #d8d8d8;
+    }
+    .checkrow input {
+      width: auto;
+      margin: 0;
+    }
+    .hint {
+      margin-top: 8px;
+      color: #aaa;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .status {
+      min-height: 18px;
+      margin-top: 8px;
+      color: #f0d48a;
+      font-size: 12px;
+    }
+    .error {
+      color: #ff918a;
+    }
+  </style>
+</head>
+<body>
+  <section>
+    <h2>Expression Mouth Editor</h2>
+    <label>
+      Expression
+      <select id="expression"></select>
+    </label>
+    <label>
+      Frame
+      <select id="frame"></select>
+    </label>
+    <div class="row">
+      <button id="play">Pause</button>
+      <button id="export">Export C Header</button>
+    </div>
+    <div class="row">
+      <button id="addPoint">Add Point After Selected</button>
+      <button id="deletePoint">Delete Selected Point</button>
+    </div>
+    <div class="row">
+      <button id="applyPoints">Apply Points Text</button>
+      <button id="smoothFrame">Smooth Current Frame</button>
+    </div>
+    <div class="row">
+      <button id="clearFrame">Clear Current Frame Points</button>
+      <button id="clearImage">Clear Reference Image</button>
+    </div>
+    <label>
+      Upload Reference Image
+      <input id="imageUpload" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
+    </label>
+    <label class="checkrow">
+      <input id="traceMode" type="checkbox">
+      Trace Mode: click canvas to append points
+    </label>
+    <div class="grid">
+      <label>
+        image x
+        <input id="imageX" type="number" step="1">
+      </label>
+      <label>
+        image y
+        <input id="imageY" type="number" step="1">
+      </label>
+      <label>
+        image scale
+        <input id="imageScale" type="number" min="0.05" max="8" step="0.05">
+      </label>
+      <label>
+        image opacity
+        <input id="imageOpacity" type="number" min="0" max="1" step="0.05">
+      </label>
+    </div>
+    <div class="grid">
+      <label>
+        mouth x
+        <input id="mouthX" type="number" step="1">
+      </label>
+      <label>
+        mouth y
+        <input id="mouthY" type="number" step="1">
+      </label>
+      <label>
+        lineWidth
+        <input id="lineWidth" type="number" min="1" max="20" step="1">
+      </label>
+      <label>
+        interval ms
+        <input id="interval" type="number" min="20" max="5000" step="10">
+      </label>
+    </div>
+    <div class="status" id="pointInfo">No point selected</div>
+    <div class="hint">
+      Pause before editing. Drag a point to edit only the selected frame.
+      Hold Shift and drag to move the whole mouth container.
+      Hold Alt and drag to move the reference image.
+      Arrow keys move the selected point by 1px; Shift + arrows move by 5px.
+    </div>
+    <label>
+      Current frame points
+      <textarea id="pointsText" spellcheck="false"></textarea>
+    </label>
+    <label>
+      C header export
+      <textarea id="exportText" spellcheck="false" readonly></textarea>
+    </label>
+  </section>
+  <canvas id="preview" width="320" height="240" tabindex="0"></canvas>
+
+  <script>
+    const DISPLAY_WIDTH = 320;
+    const DISPLAY_HEIGHT = 240;
+    const MOUTH_CONTAINER_W = 130;
+    const MOUTH_CONTAINER_H = 72;
+    const POINT_HIT_RADIUS = 7;
+
+    const mouth = {
+      idle: {
+        x: 95, y: 150, lineWidth: 7, interval: 500, sequence: [0, 1, 0],
+        frames: [
+          [[18,30],[24,35],[31,39],[38,43],[45,46],[52,49],[59,50],[65,52],[72,52],[78,52],[85,50],[92,49],[99,46],[106,43],[113,39],[120,35],[126,30]],
+          [[18,29],[24,34],[31,39],[38,43],[45,47],[52,50],[59,52],[65,54],[72,54],[78,54],[85,52],[92,50],[99,47],[106,43],[113,39],[120,34],[126,29]]
+        ]
+      },
+      happy: {
+        x: 95, y: 150, lineWidth: 7, interval: 120, sequence: [0, 1, 2, 1],
+        frames: [
+          [[0,24],[8,32],[16,39],[24,44],[32,49],[40,53],[48,56],[56,57],[65,58],[74,57],[82,56],[90,53],[98,49],[106,44],[114,39],[122,32],[130,24]],
+          [[0,20],[8,30],[16,38],[24,45],[32,51],[40,56],[48,59],[56,61],[65,62],[74,61],[82,59],[90,56],[98,51],[106,45],[114,38],[122,30],[130,20]],
+          [[0,16],[8,28],[16,38],[24,46],[32,53],[40,59],[48,63],[56,65],[65,66],[74,65],[82,63],[90,59],[98,53],[106,46],[114,38],[122,28],[130,16]]
+        ]
+      },
+      sleepy: {
+        x: 95, y: 156, lineWidth: 4, interval: 700, sequence: [0, 1, 0],
+        frames: [
+          [[20,34],[31,35],[42,36],[53,37],[65,38],[77,37],[88,36],[99,35],[110,34]],
+          [[20,36],[31,37],[42,38],[53,39],[65,40],[77,39],[88,38],[99,37],[110,36]]
+        ]
+      },
+      surprised: {
+        x: 95, y: 150, lineWidth: 5, interval: 1000, sequence: [0],
+        frames: [
+          [[65,20],[77,24],[84,36],[82,49],[72,58],[58,58],[48,49],[46,36],[53,24],[65,20]]
+        ]
+      },
+      sad: {
+        x: 95, y: 154, lineWidth: 5, interval: 600, sequence: [0, 1, 0],
+        frames: [
+          [[20,52],[31,45],[42,38],[53,32],[65,28],[77,32],[88,38],[99,45],[110,52]],
+          [[20,56],[31,48],[42,40],[53,34],[65,30],[77,34],[88,40],[99,48],[110,56]]
+        ]
+      }
+    };
+
+    const canvas = document.getElementById("preview");
+    const ctx = canvas.getContext("2d");
+    const expressionSelect = document.getElementById("expression");
+    const frameSelect = document.getElementById("frame");
+    const pointsText = document.getElementById("pointsText");
+    const exportText = document.getElementById("exportText");
+    const playButton = document.getElementById("play");
+    const pointInfo = document.getElementById("pointInfo");
+    const mouthXInput = document.getElementById("mouthX");
+    const mouthYInput = document.getElementById("mouthY");
+    const lineWidthInput = document.getElementById("lineWidth");
+    const intervalInput = document.getElementById("interval");
+    const addPointButton = document.getElementById("addPoint");
+    const deletePointButton = document.getElementById("deletePoint");
+    const applyPointsButton = document.getElementById("applyPoints");
+    const smoothFrameButton = document.getElementById("smoothFrame");
+    const clearFrameButton = document.getElementById("clearFrame");
+    const clearImageButton = document.getElementById("clearImage");
+    const imageUploadInput = document.getElementById("imageUpload");
+    const traceModeInput = document.getElementById("traceMode");
+    const imageXInput = document.getElementById("imageX");
+    const imageYInput = document.getElementById("imageY");
+    const imageScaleInput = document.getElementById("imageScale");
+    const imageOpacityInput = document.getElementById("imageOpacity");
+
+    let playing = true;
+    let seqIndex = 0;
+    let selectedFrameIndex = 0;
+    let selectedPointIndex = -1;
+    let hoverPointIndex = -1;
+    let dragMode = null;
+    let lastPointer = null;
+    let last = performance.now();
+    let referenceImage = null;
+    let referenceImageState = {
+      x: 0,
+      y: 0,
+      scale: 1,
+      opacity: 0.45,
+      baseWidth: DISPLAY_WIDTH,
+      baseHeight: DISPLAY_HEIGHT
+    };
+
+    Object.keys(mouth).forEach(name => {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      expressionSelect.appendChild(option);
+    });
+
+    function currentConfig() {
+      return mouth[expressionSelect.value];
+    }
+
+    function currentFrameIndex() {
+      if (playing) {
+        const config = currentConfig();
+        return config.sequence[seqIndex % config.sequence.length];
+      }
+      return selectedFrameIndex;
+    }
+
+    function currentFrame() {
+      return currentConfig().frames[currentFrameIndex()];
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function syncInputs() {
+      const config = currentConfig();
+      mouthXInput.value = config.x;
+      mouthYInput.value = config.y;
+      lineWidthInput.value = config.lineWidth;
+      intervalInput.value = config.interval;
+      imageXInput.value = referenceImageState.x;
+      imageYInput.value = referenceImageState.y;
+      imageScaleInput.value = referenceImageState.scale;
+      imageOpacityInput.value = referenceImageState.opacity;
+      updatePointInfo();
+    }
+
+    function formatFramePoints(frame) {
+      return "[" + frame.map(([x, y]) => `[${Math.round(x)},${Math.round(y)}]`).join(",") + "]";
+    }
+
+    function syncPointsText() {
+      pointsText.value = formatFramePoints(currentFrame());
+    }
+
+    function syncFrameSelect() {
+      const config = currentConfig();
+      frameSelect.innerHTML = "";
+      config.frames.forEach((_, index) => {
+        const option = document.createElement("option");
+        option.value = String(index);
+        option.textContent = `Frame ${index}`;
+        frameSelect.appendChild(option);
+      });
+      selectedFrameIndex = clamp(selectedFrameIndex, 0, config.frames.length - 1);
+      frameSelect.value = String(selectedFrameIndex);
+    }
+
+    function updatePointInfo() {
+      const frame = currentFrame();
+      if (selectedPointIndex < 0 || selectedPointIndex >= frame.length) {
+        pointInfo.classList.remove("error");
+        pointInfo.textContent = playing ? "Playing: pause before editing" : "No point selected";
+        return;
+      }
+      const point = frame[selectedPointIndex];
+      pointInfo.classList.remove("error");
+      pointInfo.textContent = `Point ${selectedPointIndex}: x=${point[0]}, y=${point[1]}`;
+    }
+
+    function showError(message) {
+      pointInfo.classList.add("error");
+      pointInfo.textContent = message;
+    }
+
+    function setPlaying(nextPlaying) {
+      playing = nextPlaying;
+      playButton.textContent = playing ? "Pause" : "Play";
+      frameSelect.disabled = playing;
+      addPointButton.disabled = playing;
+      deletePointButton.disabled = playing;
+      applyPointsButton.disabled = playing;
+      smoothFrameButton.disabled = playing;
+      clearFrameButton.disabled = playing;
+      pointsText.disabled = playing;
+      selectedPointIndex = -1;
+      hoverPointIndex = -1;
+      last = performance.now();
+      updateCanvasCursor();
+      updatePointInfo();
+    }
+
+    function canvasPoint(event) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: Math.round((event.clientX - rect.left) * (DISPLAY_WIDTH / rect.width)),
+        y: Math.round((event.clientY - rect.top) * (DISPLAY_HEIGHT / rect.height))
+      };
+    }
+
+    function updateCanvasCursor() {
+      if (!playing && traceModeInput.checked) {
+        canvas.style.cursor = "crosshair";
+      } else {
+        canvas.style.cursor = "default";
+      }
+    }
+
+    function hitTestPoint(pos) {
+      const config = currentConfig();
+      const frame = currentFrame();
+      let bestIndex = -1;
+      let bestDist = POINT_HIT_RADIUS + 1;
+
+      frame.forEach(([x, y], index) => {
+        const dx = pos.x - (config.x + x);
+        const dy = pos.y - (config.y + y);
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist <= POINT_HIT_RADIUS && dist < bestDist) {
+          bestDist = dist;
+          bestIndex = index;
+        }
+      });
+      return bestIndex;
+    }
+
+    function drawEye(x, y, w, h, pupilX, pupilY) {
+      ctx.fillStyle = "#fff";
+      roundRect(ctx, x, y, w, h, 24);
+      ctx.fill();
+      ctx.fillStyle = "#000";
+      ctx.beginPath();
+      ctx.arc(x + w / 2 + pupilX, y + h / 2 + pupilY, 10, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function roundRect(ctx, x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+
+    function drawMouth(config, frame) {
+      ctx.strokeStyle = "#777";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(config.x, config.y, MOUTH_CONTAINER_W, MOUTH_CONTAINER_H);
+
+      if (frame.length > 0) {
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = config.lineWidth;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.beginPath();
+        frame.forEach(([x, y], index) => {
+          const px = config.x + x;
+          const py = config.y + y;
+          if (index === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        });
+        ctx.stroke();
+      }
+
+      if (!playing) {
+        frame.forEach(([x, y], index) => {
+          const px = config.x + x;
+          const py = config.y + y;
+          ctx.beginPath();
+          ctx.arc(px, py, index === selectedPointIndex ? 4 : 3, 0, Math.PI * 2);
+          ctx.fillStyle = index === selectedPointIndex ? "#ffcc33" :
+                          index === hoverPointIndex ? "#7bdcff" : "#ff6f61";
+          ctx.fill();
+          ctx.strokeStyle = "#000";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        });
+      }
+    }
+
+    function drawReferenceImage() {
+      if (!referenceImage) return;
+
+      ctx.save();
+      ctx.globalAlpha = referenceImageState.opacity;
+      ctx.drawImage(
+        referenceImage,
+        referenceImageState.x,
+        referenceImageState.y,
+        referenceImageState.baseWidth * referenceImageState.scale,
+        referenceImageState.baseHeight * referenceImageState.scale
+      );
+      ctx.restore();
+    }
+
+    function draw() {
+      const config = currentConfig();
+      const frame = currentFrame();
+      ctx.clearRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+      drawReferenceImage();
+      drawEye(80, 60, 60, 70, 0, 0);
+      drawEye(180, 60, 60, 70, 0, 0);
+      drawMouth(config, frame);
+    }
+
+    function tick(now) {
+      const config = currentConfig();
+      if (playing && (now - last >= config.interval)) {
+        last = now;
+        seqIndex = (seqIndex + 1) % config.sequence.length;
+      }
+      draw();
+      requestAnimationFrame(tick);
+    }
+
+    function exportHeader() {
+      const lines = [];
+      lines.push("#define MOUTH_CONTAINER_W 130");
+      lines.push("#define MOUTH_CONTAINER_H 72");
+      lines.push("");
+      Object.entries(mouth).forEach(([name, config]) => {
+        lines.push(`/* ${name}: pos=(${config.x}, ${config.y}) line_width=${config.lineWidth} frame_interval_ms=${config.interval} */`);
+        config.frames.forEach((frame, frameIndex) => {
+          lines.push(`static const lv_point_precise_t mouth_${name}_${frameIndex}[] = {`);
+          frame.forEach(([x, y]) => lines.push(`    {${Math.round(x)}, ${Math.round(y)}},`));
+          lines.push("};");
+          lines.push("");
+        });
+        lines.push(`static const expression_mouth_frame_t mouth_${name}_frames[] = {`);
+        config.frames.forEach((_, frameIndex) => {
+          lines.push(`    {mouth_${name}_${frameIndex}, sizeof(mouth_${name}_${frameIndex}) / sizeof(mouth_${name}_${frameIndex}[0])},`);
+        });
+        lines.push("};");
+        lines.push("");
+        lines.push(`static const uint8_t mouth_${name}_sequence[] = {${config.sequence.join(", ")}};`);
+        lines.push("");
+      });
+      exportText.value = lines.join("\n");
+    }
+
+    function syncAllText() {
+      syncPointsText();
+      exportHeader();
+    }
+
+    function parsePointsText(text) {
+      const trimmed = text.trim();
+      let parsed = null;
+      const points = [];
+
+      if (!trimmed) {
+        throw new Error("Point text is empty");
+      }
+
+      if (trimmed.startsWith("[")) {
+        parsed = JSON.parse(trimmed);
+        if (!Array.isArray(parsed)) {
+          throw new Error("JSON point text must be an array");
+        }
+        parsed.forEach(point => {
+          if (!Array.isArray(point) || point.length < 2) {
+            throw new Error("Each point must be [x,y]");
+          }
+          points.push([Number(point[0]), Number(point[1])]);
+        });
+      } else {
+        const matches = [...trimmed.matchAll(/\{\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\}/g)];
+        if (matches.length === 0) {
+          throw new Error("Use [[x,y],...] or C style {x, y}, points");
+        }
+        matches.forEach(match => points.push([Number(match[1]), Number(match[2])]));
+      }
+
+      if (points.length < 2) {
+        throw new Error("At least 2 points are required");
+      }
+
+      return points.map(([x, y]) => {
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+          throw new Error("Point coordinates must be numbers");
+        }
+        return [
+          clamp(Math.round(x), 0, MOUTH_CONTAINER_W),
+          clamp(Math.round(y), 0, MOUTH_CONTAINER_H)
+        ];
+      });
+    }
+
+    function applyPointsText() {
+      if (playing) return;
+      try {
+        const nextFrame = parsePointsText(pointsText.value);
+        const config = currentConfig();
+        config.frames[selectedFrameIndex] = nextFrame;
+        selectedPointIndex = clamp(selectedPointIndex, 0, nextFrame.length - 1);
+        hoverPointIndex = -1;
+        syncAllText();
+        updatePointInfo();
+        draw();
+      } catch (error) {
+        showError(error.message);
+      }
+    }
+
+    function addPointAfterSelected() {
+      if (playing) return;
+      const frame = currentFrame();
+      let insertIndex = frame.length;
+      let nextPoint = [Math.round(MOUTH_CONTAINER_W / 2), Math.round(MOUTH_CONTAINER_H / 2)];
+
+      if (selectedPointIndex >= 0 && selectedPointIndex < frame.length - 1) {
+        const current = frame[selectedPointIndex];
+        const next = frame[selectedPointIndex + 1];
+        nextPoint = [
+          Math.round((current[0] + next[0]) / 2),
+          Math.round((current[1] + next[1]) / 2)
+        ];
+        insertIndex = selectedPointIndex + 1;
+      } else if (selectedPointIndex === frame.length - 1) {
+        const current = frame[selectedPointIndex];
+        nextPoint = [
+          clamp(current[0] + 8, 0, MOUTH_CONTAINER_W),
+          current[1]
+        ];
+        insertIndex = frame.length;
+      }
+
+      frame.splice(insertIndex, 0, nextPoint);
+      selectedPointIndex = insertIndex;
+      hoverPointIndex = -1;
+      syncAllText();
+      updatePointInfo();
+      draw();
+    }
+
+    function appendTracePoint(pos) {
+      if (playing || !traceModeInput.checked) return false;
+      const config = currentConfig();
+      const frame = currentFrame();
+      const point = [
+        clamp(pos.x - config.x, 0, MOUTH_CONTAINER_W),
+        clamp(pos.y - config.y, 0, MOUTH_CONTAINER_H)
+      ];
+
+      frame.push(point);
+      selectedPointIndex = frame.length - 1;
+      hoverPointIndex = -1;
+      syncAllText();
+      updatePointInfo();
+      draw();
+      return true;
+    }
+
+    function deleteSelectedPoint() {
+      if (playing) return;
+      const frame = currentFrame();
+      if (selectedPointIndex < 0 || selectedPointIndex >= frame.length) {
+        showError("Select a point before deleting");
+        return;
+      }
+      if (frame.length <= 2) {
+        showError("At least 2 points must remain");
+        return;
+      }
+
+      frame.splice(selectedPointIndex, 1);
+      selectedPointIndex = clamp(selectedPointIndex - 1, 0, frame.length - 1);
+      hoverPointIndex = -1;
+      syncAllText();
+      updatePointInfo();
+      draw();
+    }
+
+    function smoothCurrentFrame() {
+      if (playing) return;
+      const frame = currentFrame();
+      if (frame.length < 3) {
+        showError("At least 3 points are required to smooth");
+        return;
+      }
+
+      const smoothed = frame.map(point => [point[0], point[1]]);
+      for (let index = 1; index < frame.length - 1; index++) {
+        smoothed[index][0] = Math.round((frame[index - 1][0] + frame[index][0] * 2 + frame[index + 1][0]) / 4);
+        smoothed[index][1] = Math.round((frame[index - 1][1] + frame[index][1] * 2 + frame[index + 1][1]) / 4);
+        smoothed[index][0] = clamp(smoothed[index][0], 0, MOUTH_CONTAINER_W);
+        smoothed[index][1] = clamp(smoothed[index][1], 0, MOUTH_CONTAINER_H);
+      }
+
+      currentConfig().frames[selectedFrameIndex] = smoothed;
+      syncAllText();
+      updatePointInfo();
+      draw();
+    }
+
+    function clearCurrentFramePoints() {
+      if (playing) return;
+      currentConfig().frames[selectedFrameIndex] = [];
+      selectedPointIndex = -1;
+      hoverPointIndex = -1;
+      syncAllText();
+      updatePointInfo();
+      draw();
+    }
+
+    function fitReferenceImage(image) {
+      const scale = Math.min(DISPLAY_WIDTH / image.naturalWidth, DISPLAY_HEIGHT / image.naturalHeight);
+      referenceImageState.baseWidth = Math.round(image.naturalWidth * scale);
+      referenceImageState.baseHeight = Math.round(image.naturalHeight * scale);
+      referenceImageState.scale = 1;
+      referenceImageState.x = Math.round((DISPLAY_WIDTH - referenceImageState.baseWidth) / 2);
+      referenceImageState.y = Math.round((DISPLAY_HEIGHT - referenceImageState.baseHeight) / 2);
+      referenceImageState.opacity = 0.45;
+      syncInputs();
+    }
+
+    function loadReferenceImage(file) {
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const image = new Image();
+        image.onload = () => {
+          referenceImage = image;
+          fitReferenceImage(image);
+          draw();
+        };
+        image.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function clearReferenceImage() {
+      referenceImage = null;
+      imageUploadInput.value = "";
+      draw();
+    }
+
+    function applyNumberInput(input, assign) {
+      const value = Number(input.value);
+      if (!Number.isFinite(value)) return;
+      assign(Math.round(value));
+      exportHeader();
+    }
+
+    function applyImageNumberInput(input, assign) {
+      const value = Number(input.value);
+      if (!Number.isFinite(value)) return;
+      assign(Math.round(value));
+      draw();
+    }
+
+    canvas.addEventListener("pointerdown", event => {
+      canvas.focus();
+      if (playing) return;
+      const pos = canvasPoint(event);
+      lastPointer = pos;
+
+      if (event.altKey && referenceImage) {
+        dragMode = "image";
+      } else if (event.shiftKey) {
+        dragMode = "mouth";
+      } else if (traceModeInput.checked) {
+        appendTracePoint(pos);
+        dragMode = null;
+        lastPointer = null;
+      } else {
+        selectedPointIndex = hitTestPoint(pos);
+        dragMode = selectedPointIndex >= 0 ? "point" : null;
+      }
+      updatePointInfo();
+      draw();
+    });
+
+    canvas.addEventListener("pointermove", event => {
+      const pos = canvasPoint(event);
+      if (!playing && dragMode && lastPointer) {
+        const config = currentConfig();
+        const dx = pos.x - lastPointer.x;
+        const dy = pos.y - lastPointer.y;
+        if (dragMode === "mouth") {
+          config.x = clamp(config.x + dx, 0, DISPLAY_WIDTH - MOUTH_CONTAINER_W);
+          config.y = clamp(config.y + dy, 0, DISPLAY_HEIGHT - MOUTH_CONTAINER_H);
+          syncInputs();
+        } else if (dragMode === "image") {
+          referenceImageState.x += dx;
+          referenceImageState.y += dy;
+          syncInputs();
+        } else if (dragMode === "point" && selectedPointIndex >= 0) {
+          const point = currentFrame()[selectedPointIndex];
+          point[0] = clamp(point[0] + dx, 0, MOUTH_CONTAINER_W);
+          point[1] = clamp(point[1] + dy, 0, MOUTH_CONTAINER_H);
+          updatePointInfo();
+        }
+        lastPointer = pos;
+        syncAllText();
+        draw();
+        return;
+      }
+      hoverPointIndex = playing ? -1 : hitTestPoint(pos);
+      draw();
+    });
+
+    window.addEventListener("pointerup", () => {
+      dragMode = null;
+      lastPointer = null;
+    });
+
+    canvas.addEventListener("keydown", event => {
+      if (playing || selectedPointIndex < 0) return;
+      const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"];
+      if (!keys.includes(event.key)) return;
+
+      const step = event.shiftKey ? 5 : 1;
+      const point = currentFrame()[selectedPointIndex];
+      if (event.key === "ArrowLeft") point[0] -= step;
+      if (event.key === "ArrowRight") point[0] += step;
+      if (event.key === "ArrowUp") point[1] -= step;
+      if (event.key === "ArrowDown") point[1] += step;
+      point[0] = clamp(point[0], 0, MOUTH_CONTAINER_W);
+      point[1] = clamp(point[1], 0, MOUTH_CONTAINER_H);
+      event.preventDefault();
+      updatePointInfo();
+      syncAllText();
+      draw();
+    });
+
+    playButton.addEventListener("click", () => setPlaying(!playing));
+    document.getElementById("export").addEventListener("click", exportHeader);
+    addPointButton.addEventListener("click", addPointAfterSelected);
+    deletePointButton.addEventListener("click", deleteSelectedPoint);
+    applyPointsButton.addEventListener("click", applyPointsText);
+    smoothFrameButton.addEventListener("click", smoothCurrentFrame);
+    clearFrameButton.addEventListener("click", clearCurrentFramePoints);
+    clearImageButton.addEventListener("click", clearReferenceImage);
+    imageUploadInput.addEventListener("change", event => loadReferenceImage(event.target.files[0]));
+    traceModeInput.addEventListener("change", () => {
+      selectedPointIndex = -1;
+      hoverPointIndex = -1;
+      updateCanvasCursor();
+      updatePointInfo();
+      draw();
+    });
+    expressionSelect.addEventListener("change", () => {
+      seqIndex = 0;
+      selectedFrameIndex = 0;
+      selectedPointIndex = -1;
+      syncFrameSelect();
+      syncInputs();
+      syncAllText();
+      draw();
+    });
+    frameSelect.addEventListener("change", () => {
+      selectedFrameIndex = Number(frameSelect.value);
+      selectedPointIndex = -1;
+      updatePointInfo();
+      syncPointsText();
+      draw();
+    });
+    mouthXInput.addEventListener("input", () => applyNumberInput(mouthXInput, value => {
+      currentConfig().x = clamp(value, 0, DISPLAY_WIDTH - MOUTH_CONTAINER_W);
+      mouthXInput.value = currentConfig().x;
+    }));
+    mouthYInput.addEventListener("input", () => applyNumberInput(mouthYInput, value => {
+      currentConfig().y = clamp(value, 0, DISPLAY_HEIGHT - MOUTH_CONTAINER_H);
+      mouthYInput.value = currentConfig().y;
+    }));
+    lineWidthInput.addEventListener("input", () => applyNumberInput(lineWidthInput, value => {
+      currentConfig().lineWidth = clamp(value, 1, 20);
+      lineWidthInput.value = currentConfig().lineWidth;
+    }));
+    intervalInput.addEventListener("input", () => applyNumberInput(intervalInput, value => {
+      currentConfig().interval = clamp(value, 20, 5000);
+      intervalInput.value = currentConfig().interval;
+    }));
+    imageXInput.addEventListener("input", () => applyImageNumberInput(imageXInput, value => {
+      referenceImageState.x = value;
+      imageXInput.value = referenceImageState.x;
+    }));
+    imageYInput.addEventListener("input", () => applyImageNumberInput(imageYInput, value => {
+      referenceImageState.y = value;
+      imageYInput.value = referenceImageState.y;
+    }));
+    imageScaleInput.addEventListener("input", () => {
+      const value = Number(imageScaleInput.value);
+      if (!Number.isFinite(value)) return;
+      referenceImageState.scale = clamp(value, 0.05, 8);
+      imageScaleInput.value = referenceImageState.scale;
+      draw();
+    });
+    imageOpacityInput.addEventListener("input", () => {
+      const value = Number(imageOpacityInput.value);
+      if (!Number.isFinite(value)) return;
+      referenceImageState.opacity = clamp(value, 0, 1);
+      imageOpacityInput.value = referenceImageState.opacity;
+      draw();
+    });
+
+    syncFrameSelect();
+    syncInputs();
+    setPlaying(true);
+    updateCanvasCursor();
+    syncAllText();
+    requestAnimationFrame(tick);
+  </script>
+</body>
+</html>

@@ -36,6 +36,19 @@ typedef enum {
     DISPLAY_PROVISIONING_STATE_FAILED = 4,
 } display_provisioning_state_t;
 
+typedef enum {
+    DISPLAY_PAGE_STATUS = 0,
+    DISPLAY_PAGE_EXPRESSION = 1,
+} display_page_t;
+
+typedef enum {
+    DISPLAY_EXPRESSION_IDLE = 0,
+    DISPLAY_EXPRESSION_HAPPY = 1,
+    DISPLAY_EXPRESSION_SLEEPY = 2,
+    DISPLAY_EXPRESSION_SURPRISED = 3,
+    DISPLAY_EXPRESSION_SAD = 4,
+} display_expression_kind_t;
+
 typedef struct display_weather_panel {
     bool visible;
     weather_icon_kind_t icon;
@@ -48,6 +61,8 @@ typedef struct {
     display_weather_panel_t weather_panel;
     display_provisioning_state_t provisioning_state;
     char provisioning_qr_payload[DISPLAY_PROVISIONING_QR_PAYLOAD_SIZE];
+    display_page_t page;
+    display_expression_kind_t expression;
     bool time_valid;
     struct tm current_time;
 } display_view_model_t;
