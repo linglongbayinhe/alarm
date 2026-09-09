@@ -68,6 +68,7 @@ static void app_blufi_cloud_config_changed(void *ctx);
 #define EXAMPLE_UI_TASK_PRIORITY   5
 #define EXAMPLE_RUNTIME_TRANSITION_TASK_STACK_SIZE 4096
 #define EXAMPLE_RUNTIME_TRANSITION_TASK_PRIORITY   4
+#define EXAMPLE_EXPRESSION_AUTO_PAGE_ENABLE 1
 #define EXAMPLE_EXPRESSION_IDLE_MS 20000
 
 /* FreeRTOS event group to signal when we are connected & ready to make a request */
@@ -325,6 +326,7 @@ static void app_apply_expression_page(display_view_model_t *view_model)
     view_model->page = DISPLAY_PAGE_STATUS;
     view_model->expression = DISPLAY_EXPRESSION_SLEEPY;
 
+#if EXAMPLE_EXPRESSION_AUTO_PAGE_ENABLE
     taskENTER_CRITICAL(&s_expression_state_lock);
     idle_ready = s_expression_idle_ready;
     ready_tick = s_expression_ready_tick;
@@ -343,6 +345,7 @@ static void app_apply_expression_page(display_view_model_t *view_model)
     if ((now - latest_activity) >= pdMS_TO_TICKS(EXAMPLE_EXPRESSION_IDLE_MS)) {
         view_model->page = DISPLAY_PAGE_EXPRESSION;
     }
+#endif
 }
 
 static esp_err_t app_set_force_blufi_once(void)

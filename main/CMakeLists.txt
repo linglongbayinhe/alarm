@@ -10,7 +10,7 @@ idf_component_register(SRCS "ble/blufi_service.c" "main.c"
                             "network/device_cloud_service.c"
                             "display/display_lvgl.c"
                             "display/display_service.c"
-                            "display/expression_lvgl.c"
+                            "display/expression_emote.c"
                             "fonts/SourceHanSans_Normal_16.c"
                             "network/network_task_service.c"
                             "playback_task_service.c"
@@ -49,6 +49,7 @@ idf_component_register(SRCS "ble/blufi_service.c" "main.c"
                                   cjson
                                   lvgl
                                   esp_lvgl_port
+                                  esp_emote_gen_player
                     INCLUDE_DIRS "."
                                  "button"
                                  "ble"

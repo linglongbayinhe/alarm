@@ -1,0 +1,73 @@
+menu "Emote Gen Player ST7789 Experiment"
+
+    choice EMOTE_EXPERIMENT_ASSET_SOURCE
+        prompt "Emote Gen asset source"
+        default EMOTE_EXPERIMENT_ASSET_SOURCE_PARTITION
+
+        config EMOTE_EXPERIMENT_ASSET_SOURCE_PATH
+            bool "Filesystem path"
+
+        config EMOTE_EXPERIMENT_ASSET_SOURCE_PARTITION
+            bool "Partition label"
+    endchoice
+
+    config EMOTE_EXPERIMENT_ASSET_PATH
+        string "Asset pack filesystem path"
+        depends on EMOTE_EXPERIMENT_ASSET_SOURCE_PATH
+        default "/ext/emote/normal.bin"
+
+    config EMOTE_EXPERIMENT_MOUNT_EXTERNAL_FATFS
+        bool "Mount external W25Q128 FATFS at /ext"
+        depends on EMOTE_EXPERIMENT_ASSET_SOURCE_PATH
+        default y
+
+    config EMOTE_EXPERIMENT_ASSET_PARTITION_LABEL
+        string "Asset partition label"
+        depends on EMOTE_EXPERIMENT_ASSET_SOURCE_PARTITION
+        default "emote_gen"
+
+    config EMOTE_EXPERIMENT_MMAP_ENABLE
+        bool "Enable mmap asset access"
+        default y
+
+    config EMOTE_EXPERIMENT_INITIAL_ANIM_NAME
+        string "Initial animation name"
+        default "normal"
+
+    config EMOTE_EXPERIMENT_FALLBACK_ANIM_NAME
+        string "Fallback animation name"
+        default "idle"
+
+    config EMOTE_EXPERIMENT_FPS
+        int "Render FPS"
+        range 5 60
+        default 30
+
+    config EMOTE_EXPERIMENT_BUFFER_LINES
+        int "Flush buffer lines"
+        range 1 240
+        default 8
+
+    config EMOTE_EXPERIMENT_TASK_PRIORITY
+        int "Player task priority"
+        range 1 24
+        default 5
+
+    config EMOTE_EXPERIMENT_TASK_STACK
+        int "Player task stack bytes"
+        range 4096 32768
+        default 8192
+
+    config EMOTE_EXPERIMENT_BUFF_SPIRAM
+        bool "Prefer PSRAM for player buffers"
+        default n
+        help
+            Keep this disabled for the first validation because SPI LCD
+            transfers need DMA-capable memory. Enable later only after the
+            basic flush path is proven stable.
+
+    config EMOTE_EXPERIMENT_COLOR_SWAP
+        bool "Swap RGB565 bytes in player output"
+        default n
+
+endmenu

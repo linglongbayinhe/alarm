@@ -24,6 +24,11 @@ CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
 CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
 CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=2048
+# Keep TLS working alongside the two LVGL/Emote framebuffers and render tasks.
+# The board has PSRAM, so large transient handshake allocations do not need to
+# consume the scarce internal heap.
+# CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC is not set
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 # CONFIG_MBEDTLS_DYNAMIC_BUFFER is not set
 # CONFIG_MBEDTLS_SSL_MAX_FRAGMENT_LENGTH is not set
 # CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH is not set

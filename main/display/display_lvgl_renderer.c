@@ -11,7 +11,7 @@
 #include "src/libs/qrcode/lv_qrcode.h"
 #include "src/libs/qrcode/qrcodegen.h"
 #include "display_config.h"
-#include "expression_lvgl.h"
+#include "expression_emote.h"
 #include "fonts.h"
 #include "screens.h"
 #include "status_lvgl_image.h"
@@ -53,7 +53,6 @@ static lv_obj_t *s_provision_message;
 static display_provisioning_state_t s_last_provisioning_state = DISPLAY_PROVISIONING_STATE_HIDDEN;
 static char s_last_qr_payload[DISPLAY_LVGL_RENDERER_QR_CACHE_SIZE];
 static display_page_t s_last_page = DISPLAY_PAGE_STATUS;
-static display_expression_kind_t s_last_expression = DISPLAY_EXPRESSION_IDLE;
 
 static bool display_lvgl_renderer_copy_view_model(display_view_model_t *view_model)
 {
@@ -163,26 +162,16 @@ static void display_lvgl_renderer_set_status_visible(bool visible)
 static void display_lvgl_renderer_update_page(const display_view_model_t *view_model)
 {
     display_page_t page = DISPLAY_PAGE_STATUS;
-    display_expression_kind_t expression = DISPLAY_EXPRESSION_IDLE;
 
     if (view_model != NULL) {
         page = view_model->page;
-        expression = view_model->expression;
     }
     if (page > DISPLAY_PAGE_EXPRESSION) {
         page = DISPLAY_PAGE_STATUS;
     }
-    if (expression > DISPLAY_EXPRESSION_SAD) {
-        expression = DISPLAY_EXPRESSION_IDLE;
-    }
-
-    if (expression != s_last_expression) {
-        expression_lvgl_set_mode(expression);
-        s_last_expression = expression;
-    }
     if (page != s_last_page) {
         display_lvgl_renderer_set_status_visible(page == DISPLAY_PAGE_STATUS);
-        expression_lvgl_set_visible(page == DISPLAY_PAGE_EXPRESSION);
+        expression_emote_set_visible(page == DISPLAY_PAGE_EXPRESSION);
         s_last_page = page;
     }
 }
@@ -498,7 +487,7 @@ static void display_lvgl_renderer_time_cb(lv_timer_t *timer)
 
 void display_lvgl_renderer_init(void)
 {
-    expression_lvgl_init(objects.main);
+    (void)expression_emote_init(objects.main);
     lv_timer_create(display_lvgl_renderer_time_cb, DISPLAY_LVGL_RENDERER_REFRESH_MS, NULL);
 }
 

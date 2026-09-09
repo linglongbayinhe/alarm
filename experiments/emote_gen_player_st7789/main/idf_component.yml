@@ -1,0 +1,4 @@
+dependencies:
+  esp_emote_gen_player:
+    git: https://github.com/espressif2022/esp_emote_gen_player.git
+    version: "*"
